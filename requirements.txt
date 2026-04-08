@@ -4,3 +4,4 @@ openai
 pdfplumber
 PyPDF2
 requests
+beautifulsoup4
