@@ -34,7 +34,7 @@ PARISH_BULLETINS = {
 
 # OpenAI API Key (you'll need to add yours)
 # Get from: https://platform.openai.com/api-keys
-OPENAI_API_KEY = "YOUR_API_KEY_HERE"  # <-- YOU NEED TO ADD THIS
+OPENAI_API_KEY = "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"  # <-- YOU NEED TO ADD THIS
 
 # ============================================
 # AI PROMPT FOR EVENT EXTRACTION
