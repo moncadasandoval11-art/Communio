@@ -1,2 +1,6 @@
 streamlit
 pandas
+openai
+pdfplumber
+PyPDF2
+requests
