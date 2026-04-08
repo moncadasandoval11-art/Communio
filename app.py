@@ -5,7 +5,12 @@ from urllib.parse import urljoin
 import pandas as pd
 import requests
 import streamlit as st
-from bs4 import BeautifulSoup
+
+try:
+    from bs4 import BeautifulSoup
+except ImportError:
+    st.error("Missing dependency: beautifulsoup4. Add it to requirements.txt and redeploy.")
+    st.stop()
 
 st.set_page_config(page_title="Communio", page_icon="⛪", layout="wide")
 
@@ -27,7 +32,8 @@ CATEGORY_OPTIONS = [
     "Holiday / Holy Day",
 ]
 
-st.markdown("""
+st.markdown(
+    """
 <style>
 .block-container {
     padding-top: 1.2rem;
@@ -35,7 +41,7 @@ st.markdown("""
 }
 .big-title {
     text-align: center;
-    font-size: 3.4rem;
+    font-size: 3.2rem;
     font-weight: 800;
     color: #d4a853;
     margin-bottom: 0;
@@ -83,31 +89,37 @@ st.markdown("""
     margin-bottom: 0.35rem;
     font-size: 0.82rem;
 }
-.section-header {
-    color: #d4a853;
-    margin-top: 0.2rem;
-}
 a {
     text-decoration: none !important;
 }
 </style>
-""", unsafe_allow_html=True)
+""",
+    unsafe_allow_html=True,
+)
 
 
 def clean_text(value: str) -> str:
     return re.sub(r"\s+", " ", value or "").strip()
 
 
+def normalize_name(value: str) -> str:
+    value = clean_text(value).replace("†", "")
+    value = value.replace("Saint ", "St. ")
+    value = value.replace("Saint", "St.")
+    value = value.replace("Cathedral of Saint", "Cathedral of St.")
+    return clean_text(value.lower())
+
+
 def infer_category(title: str) -> str:
     t = (title or "").lower()
 
-    if any(word in t for word in ["mass", "requiem", "holy week", "holy thursday", "good friday", "holy saturday", "resurrection", "sunday of easter", "mind mass"]):
+    if any(word in t for word in ["mass", "requiem", "holy week", "holy thursday", "good friday", "holy saturday", "resurrection", "easter vigil"]):
         return "Liturgy / Mass"
-    if any(word in t for word in ["adoration"]):
+    if "adoration" in t:
         return "Adoration"
     if any(word in t for word in ["confession", "stations of the cross", "rosary", "prayer"]):
         return "Confession / Prayer"
-    if any(word in t for word in ["retreat"]):
+    if "retreat" in t:
         return "Retreat"
     if any(word in t for word in ["youth", "young adult"]):
         return "Youth / Young Adult"
@@ -115,11 +127,11 @@ def infer_category(title: str) -> str:
         return "Marriage / Family"
     if any(word in t for word in ["school", "open house"]):
         return "School / Open House"
-    if any(word in t for word in ["shower", "charities", "drive", "need"]):
+    if any(word in t for word in ["charities", "baby shower", "families in need", "drive"]):
         return "Service / Charity"
-    if any(word in t for word in ["theology", "saint thomas", "formation", "catechesis", "study"]):
+    if any(word in t for word in ["theology", "saint thomas", "formation", "study", "tour"]):
         return "Adult Formation"
-    if any(word in t for word in ["festival", "fellowship", "social", "vineyard", "viñedo"]):
+    if any(word in t for word in ["vineyard", "viñedo", "social", "fellowship", "festival"]):
         return "Social / Fellowship"
     if any(word in t for word in ["easter", "christmas", "advent", "pentecost", "holy day"]):
         return "Holiday / Holy Day"
@@ -134,24 +146,8 @@ def fetch_parishes() -> pd.DataFrame:
     response.raise_for_status()
 
     soup = BeautifulSoup(response.text, "html.parser")
-    main_text = soup.get_text("\n")
-    lines = [clean_text(x) for x in main_text.splitlines() if clean_text(x)]
-
-    start_idx = None
-    end_idx = None
-    for i, line in enumerate(lines):
-        if line == "Parishes in the Diocese of Palm Beach":
-            start_idx = i + 1
-        if line == "Next section:":
-            end_idx = i
-            break
-
-    if start_idx is None:
-        raise ValueError("Could not find parish section on the Diocese page.")
-
-    working = lines[start_idx:end_idx]
-    deanery = None
-    rows = []
+    text = soup.get_text("\n")
+    lines = [clean_text(x) for x in text.splitlines() if clean_text(x)]
 
     deanery_names = {
         "Northern Deanery",
@@ -160,99 +156,126 @@ def fetch_parishes() -> pd.DataFrame:
         "Southern Deanery",
     }
 
-    for line in working:
-        if line in deanery_names:
-            deanery = line
-            continue
-
-        match = re.match(
-            r"^\d+\.\s*(.+?),\s*([A-Za-z .'\-]+?)(?:,\s*FL\s*\d{5})?,\s*(\d{3}-\d{3}-\d{4})",
-            line,
-        )
-        if not match:
-            continue
-
-        parish_name = clean_text(match.group(1))
-        city = clean_text(match.group(2))
-        phone = clean_text(match.group(3))
-
-        rows.append(
-            {
-                "parish": parish_name,
-                "city": city,
-                "deanery": deanery or "Unknown",
-                "phone": phone,
-            }
-        )
-
-    # add websites from anchor tags where possible
-    website_map = {}
+    rows = []
     current_deanery = None
-    for tag in soup.find_all(["h1", "h2", "h3", "h4", "h5", "p", "li", "a"]):
-        text = clean_text(tag.get_text(" ", strip=True))
-        if text in deanery_names:
-            current_deanery = text
 
-        href = tag.get("href")
-        if not href or href.startswith("mailto:"):
+    i = 0
+    while i < len(lines):
+        line = lines[i].replace("†", "").strip()
+
+        if line in deanery_names:
+            current_deanery = line
+            i += 1
             continue
 
-        absolute_href = urljoin(PARISHES_URL, href)
-        link_text = clean_text(tag.get_text(" ", strip=True))
-        if link_text and not link_text.lower().startswith("image:"):
-            website_map[link_text] = absolute_href
+        if re.match(r"^\d+\.", line):
+            combined = line
 
-    for row in rows:
-        row["website"] = website_map.get(row["parish"], "")
+            while i + 1 < len(lines):
+                nxt = lines[i + 1].replace("†", "").strip()
+                if re.match(r"^\d+\.", nxt) or nxt in deanery_names or nxt == "Next section:":
+                    break
+                combined += " " + nxt
+                i += 1
 
-    df = pd.DataFrame(rows).drop_duplicates(subset=["parish"]).sort_values(["deanery", "parish"]).reset_index(drop=True)
+            combined = re.sub(r"^\d+\.\s*", "", combined).strip()
+            main_part = combined.split("Email:")[0].strip()
+
+            phone_match = re.search(r"(\d{3}-\d{3}-\d{4})", main_part)
+            phone = phone_match.group(1) if phone_match else ""
+            if phone:
+                main_part = main_part.replace(phone, "").strip(" ,")
+
+            parts = [p.strip() for p in main_part.split(",") if p.strip()]
+            parish = parts[0] if parts else ""
+            city = ""
+
+            if len(parts) >= 2:
+                city = parts[-1]
+                city = re.sub(r"\bFL\s+\d{5}\b", "", city).strip(" ,")
+
+            rows.append(
+                {
+                    "parish": parish,
+                    "city": city,
+                    "deanery": current_deanery or "Unknown",
+                    "phone": phone,
+                }
+            )
+
+        i += 1
+
+    df = pd.DataFrame(rows)
+
+    for col in ["parish", "city", "deanery", "phone"]:
+        if col not in df.columns:
+            df[col] = ""
+
+    website_map = {}
+    for a in soup.find_all("a", href=True):
+        name = clean_text(a.get_text(" ", strip=True)).replace("†", "").strip()
+        href = a["href"].strip()
+        if not name or not href or href.startswith("mailto:") or href.startswith("javascript:"):
+            continue
+        full_url = urljoin(PARISHES_URL, href)
+        website_map.setdefault(name, full_url)
+
+    df["website"] = df["parish"].map(website_map).fillna("")
+    df = df[df["parish"] != ""].drop_duplicates(subset=["parish"]).sort_values(["deanery", "parish"]).reset_index(drop=True)
     return df
 
 
 def _extract_event_lines(text: str) -> list[str]:
     lines = [clean_text(x) for x in text.splitlines() if clean_text(x)]
-    output = []
+    out = []
+    date_header_pattern = re.compile(r"^(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday),\s+[A-Za-z]+\s+\d{1,2},\s+\d{4}$")
 
-    date_header_pattern = re.compile(
-        r"^(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday),\s+[A-Za-z]+\s+\d{1,2},\s+\d{4}$"
-    )
-
-    in_daily_listing = False
+    started = False
     for line in lines:
         if date_header_pattern.match(line):
-            in_daily_listing = True
-            output.append(line)
+            started = True
+            out.append(line)
             continue
-
-        if not in_daily_listing:
-            continue
-
-        if line in {"March 2026", "May 2026", "Privacy Policy"}:
-            break
-
-        output.append(line)
-
-    return output
+        if started:
+            out.append(line)
+    return out
 
 
 @st.cache_data(ttl=60 * 60 * 4, show_spinner=False)
-def fetch_events(year: int, month: int) -> pd.DataFrame:
+def fetch_events(year: int, month: int, parish_names: list[str]) -> pd.DataFrame:
     url = EVENTS_URL_TEMPLATE.format(year=year, month=month)
     headers = {"User-Agent": "Mozilla/5.0"}
     response = requests.get(url, headers=headers, timeout=30)
     response.raise_for_status()
 
     soup = BeautifulSoup(response.text, "html.parser")
-    text = soup.get_text("\n")
-    lines = _extract_event_lines(text)
+    lines = _extract_event_lines(soup.get_text("\n"))
 
-    date_header_pattern = re.compile(
-        r"^(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday),\s+[A-Za-z]+\s+\d{1,2},\s+\d{4}$"
+    date_header_pattern = re.compile(r"^(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday),\s+[A-Za-z]+\s+\d{1,2},\s+\d{4}$")
+    event_line_pattern = re.compile(
+        r"^(.*?)\s+(All Day|\d{1,2}:\d{2}\s*(?:am|pm)\s*-\s*\d{1,2}:\d{2}\s*(?:am|pm)|\d{1,2}:\d{2}\s*(?:am|pm))$",
+        re.I,
     )
-    event_line_pattern = re.compile(r"^(.*?)\s+(All Day|\d{1,2}:\d{2}\s*(?:am|pm)\s*-\s*\d{1,2}:\d{2}\s*(?:am|pm))$", re.I)
 
+    normalized_map = {normalize_name(p): p for p in parish_names}
     rows = []
     current_date = None
+
+    def detect_parish(title: str) -> str:
+        title_norm = normalize_name(title)
+        for norm_name, original in normalized_map.items():
+            if norm_name and norm_name in title_norm:
+                return original
+
+        # handles event titles like "(St. Jude - Tequesta)"
+        abbreviated = {
+            normalize_name(p.replace("Saint ", "St. ").replace("Saint", "St.")): p
+            for p in parish_names
+        }
+        for norm_name, original in abbreviated.items():
+            if norm_name and norm_name in title_norm:
+                return original
+        return ""
 
     for line in lines:
         if date_header_pattern.match(line):
@@ -263,55 +286,35 @@ def fetch_events(year: int, month: int) -> pd.DataFrame:
             continue
 
         line = line.lstrip("* ").strip()
-
         match = event_line_pattern.match(line)
-        if match:
-            title = clean_text(match.group(1))
-            time_text = clean_text(match.group(2))
-            rows.append(
-                {
-                    "date_label": current_date,
-                    "title": title,
-                    "time": time_text,
-                    "category": infer_category(title),
-                    "source_url": url,
-                }
-            )
+        if not match:
+            continue
 
-    df = pd.DataFrame(rows)
-    if df.empty:
-        return pd.DataFrame(columns=["date_label", "title", "time", "category", "source_url"])
+        title = clean_text(match.group(1))
+        time_text = clean_text(match.group(2))
 
-    # crude parish detection from title text
-    parishes = fetch_parishes()
-    parish_names = parishes["parish"].tolist()
+        rows.append(
+            {
+                "date_label": current_date,
+                "title": title,
+                "time": time_text,
+                "category": infer_category(title),
+                "parish": detect_parish(title),
+                "source_url": url,
+            }
+        )
 
-    def detect_parish(title: str) -> str:
-        tl = title.lower()
-        for parish in parish_names:
-            if parish.lower() in tl:
-                return parish
-        # handle short names in parentheses like (St. Jude - Tequesta)
-        for parish in parish_names:
-            short = parish.replace("Saint", "St.").replace("Saint ", "St. ").lower()
-            if short in tl or parish.lower().replace("saint", "st.") in tl:
-                return parish
-        return ""
+    if not rows:
+        return pd.DataFrame(columns=["date_label", "title", "time", "category", "parish", "source_url"])
 
-    df["parish"] = df["title"].apply(detect_parish)
-    return df
+    return pd.DataFrame(rows)
 
 
 def parish_matches_search(row: pd.Series, query: str) -> bool:
     if not query:
         return True
     haystack = " ".join(
-        [
-            str(row.get("parish", "")),
-            str(row.get("city", "")),
-            str(row.get("deanery", "")),
-            str(row.get("phone", "")),
-        ]
+        [str(row.get("parish", "")), str(row.get("city", "")), str(row.get("deanery", "")), str(row.get("phone", ""))]
     ).lower()
     return query.lower() in haystack
 
@@ -320,32 +323,23 @@ def event_matches_search(row: pd.Series, query: str) -> bool:
     if not query:
         return True
     haystack = " ".join(
-        [
-            str(row.get("title", "")),
-            str(row.get("date_label", "")),
-            str(row.get("time", "")),
-            str(row.get("category", "")),
-            str(row.get("parish", "")),
-        ]
+        [str(row.get("title", "")), str(row.get("date_label", "")), str(row.get("time", "")), str(row.get("category", "")), str(row.get("parish", ""))]
     ).lower()
     return query.lower() in haystack
 
 
 def render_parish_card(row: pd.Series):
     st.markdown('<div class="parish-card">', unsafe_allow_html=True)
-    left, right = st.columns([5, 1.6])
+    left, right = st.columns([5, 1.5])
     with left:
         st.markdown(f"### {row['parish']}")
         st.markdown(
-            f"<span class='badge'>{row['deanery']}</span>"
-            f"<span class='badge'>{row['city']}</span>",
+            f"<span class='badge'>{row['deanery']}</span><span class='badge'>{row['city']}</span>",
             unsafe_allow_html=True,
         )
-        st.markdown(
-            f"<div class='small-muted'>📞 {row['phone']}</div>",
-            unsafe_allow_html=True,
-        )
-        if row.get("website"):
+        if row["phone"]:
+            st.markdown(f"<div class='small-muted'>📞 {row['phone']}</div>", unsafe_allow_html=True)
+        if row["website"]:
             st.markdown(f"[Visit parish website]({row['website']})")
     with right:
         if st.button("Show events", key=f"show_{row['parish']}"):
@@ -354,31 +348,30 @@ def render_parish_card(row: pd.Series):
 
 
 def render_event_card(row: pd.Series):
+    parish_badge = f"<span class='badge'>{row['parish']}</span>" if row.get("parish") else ""
     st.markdown(
         f"""
         <div class="event-card">
             <div class="small-muted">{row['date_label']} · {row['time']}</div>
-            <div style="font-size:1.15rem;font-weight:700;margin:0.35rem 0 0.45rem 0;">{row['title']}</div>
+            <div style="font-size:1.12rem;font-weight:700;margin:0.35rem 0 0.45rem 0;">{row['title']}</div>
             <span class="badge">{row['category']}</span>
-            {"<span class='badge'>" + row['parish'] + "</span>" if row.get("parish") else ""}
+            {parish_badge}
         </div>
         """,
         unsafe_allow_html=True,
     )
 
 
-# Header
 st.markdown('<div class="big-title">⛪ COMMUNIO</div>', unsafe_allow_html=True)
 st.markdown(
-    '<div class="subtitle">Diocese of Palm Beach · Parish Directory + Live Monthly Event Feed</div>',
+    '<div class="subtitle">Diocese of Palm Beach · Interactive Parish Directory and Event Browser</div>',
     unsafe_allow_html=True,
 )
 
-# Sidebar controls
 with st.sidebar:
     st.header("Filters")
     view_mode = st.radio("View", ["Dashboard", "Parishes", "Events"], index=0)
-    search = st.text_input("Search", placeholder="Parish, event, city, keyword...")
+    search = st.text_input("Search", placeholder="Parish, city, event, keyword...")
     category = st.selectbox("Event category", CATEGORY_OPTIONS, index=0)
     year = st.number_input("Year", min_value=2024, max_value=2030, value=date.today().year, step=1)
     month = st.selectbox(
@@ -387,6 +380,8 @@ with st.sidebar:
         format_func=lambda m: date(2000, m, 1).strftime("%B"),
         index=date.today().month - 1,
     )
+    if st.button("Clear selected parish"):
+        st.session_state["selected_parish"] = ""
 
 try:
     parishes_df = fetch_parishes()
@@ -394,11 +389,15 @@ except Exception as e:
     st.error(f"Could not load parish data from the diocesan website: {e}")
     st.stop()
 
+if parishes_df.empty:
+    st.error("No parish data was parsed from the diocesan website.")
+    st.stop()
+
 try:
-    events_df = fetch_events(year, month)
+    events_df = fetch_events(year, month, parishes_df["parish"].tolist())
 except Exception as e:
-    events_df = pd.DataFrame(columns=["date_label", "title", "time", "category", "source_url", "parish"])
-    st.warning(f"Event feed could not be loaded right now: {e}")
+    events_df = pd.DataFrame(columns=["date_label", "title", "time", "category", "parish", "source_url"])
+    st.warning(f"Could not load the diocesan event calendar right now: {e}")
 
 filtered_parishes = parishes_df[parishes_df.apply(lambda r: parish_matches_search(r, search), axis=1)].copy()
 filtered_events = events_df[events_df.apply(lambda r: event_matches_search(r, search), axis=1)].copy()
@@ -412,7 +411,6 @@ if selected_parish:
 else:
     filtered_events_for_selected = pd.DataFrame(columns=filtered_events.columns)
 
-# Stats
 c1, c2, c3, c4 = st.columns(4)
 with c1:
     st.markdown(f'<div class="stat-card"><h3>{len(parishes_df)}</h3><p>Total Parishes</p></div>', unsafe_allow_html=True)
@@ -421,7 +419,7 @@ with c2:
 with c3:
     st.markdown(f'<div class="stat-card"><h3>{len(events_df)}</h3><p>Events This Month</p></div>', unsafe_allow_html=True)
 with c4:
-    st.markdown(f'<div class="stat-card"><h3>{filtered_events["category"].nunique() if not filtered_events.empty else 0}</h3><p>Visible Categories</p></div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="stat-card"><h3>{len(filtered_parishes)}</h3><p>Visible Parishes</p></div>', unsafe_allow_html=True)
 
 st.divider()
 
@@ -429,36 +427,32 @@ if view_mode == "Dashboard":
     left, right = st.columns([1.15, 1])
 
     with left:
-        st.markdown("## Featured parishes")
-        for _, row in filtered_parishes.head(10).iterrows():
+        st.subheader("Parishes")
+        for _, row in filtered_parishes.head(12).iterrows():
             render_parish_card(row)
-
-        if len(filtered_parishes) > 10:
-            st.info(f"Showing 10 of {len(filtered_parishes)} matching parishes. Open the Parishes view to browse all of them.")
+        if len(filtered_parishes) > 12:
+            st.info(f"Showing 12 of {len(filtered_parishes)} matching parishes.")
 
     with right:
-        st.markdown("## Upcoming events")
+        st.subheader("Upcoming events")
         if filtered_events.empty:
             st.info("No events matched the current filters.")
         else:
-            for _, row in filtered_events.head(10).iterrows():
+            for _, row in filtered_events.head(12).iterrows():
                 render_event_card(row)
 
         if selected_parish:
-            st.markdown(f"## Events for {selected_parish}")
+            st.subheader(f"Events for {selected_parish}")
             if filtered_events_for_selected.empty:
-                st.info("No currently visible events are tagged to this parish from the monthly feed.")
+                st.info("No currently visible events were matched to this parish.")
             else:
                 for _, row in filtered_events_for_selected.iterrows():
                     render_event_card(row)
 
 elif view_mode == "Parishes":
-    st.markdown("## All parishes")
-    deanery_filter = st.multiselect(
-        "Filter by deanery",
-        options=sorted(parishes_df["deanery"].dropna().unique().tolist()),
-        default=sorted(parishes_df["deanery"].dropna().unique().tolist()),
-    )
+    st.subheader("All parishes")
+    deanery_options = sorted(parishes_df["deanery"].dropna().unique().tolist())
+    deanery_filter = st.multiselect("Filter by deanery", options=deanery_options, default=deanery_options)
 
     display_df = filtered_parishes[filtered_parishes["deanery"].isin(deanery_filter)].copy()
 
@@ -471,19 +465,18 @@ elif view_mode == "Parishes":
                 render_parish_card(row)
 
 else:
-    st.markdown("## Monthly event feed")
-    st.caption("This view shows events for the selected month from the diocesan calendar page.")
-
+    st.subheader("Monthly diocesan events")
+    st.caption("Browse the official diocesan event calendar by month and category.")
     if filtered_events.empty:
         st.info("No events matched the current filters.")
     else:
         for date_label, group in filtered_events.groupby("date_label", sort=False):
-            with st.expander(date_label, expanded=False):
+            with st.expander(date_label):
                 for _, row in group.iterrows():
                     render_event_card(row)
 
 st.divider()
 st.markdown(
-    "<p style='text-align:center;color:#8a8a8a;'>Communio · Diocese of Palm Beach · Interactive parish directory and event browser</p>",
+    "<p style='text-align:center;color:#8a8a8a;'>Communio · Diocese of Palm Beach · Built with Streamlit</p>",
     unsafe_allow_html=True,
 )
