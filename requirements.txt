@@ -5,3 +5,9 @@ pdfplumber
 PyPDF2
 requests
 beautifulsoup4
+streamlit
+pandas
+openai
+pdfplumber
+requests
+beautifulsoup4
