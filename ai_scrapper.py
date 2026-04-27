@@ -1,226 +1,473 @@
 """
-AI Event Scraper for Diocese of Palm Beach
-This script uses AI to extract events from parish bulletins
+Communio Bulletin Scraper for the Diocese of Palm Beach
+
+What this does:
+1. Reads the diocesan parish directory page.
+2. Finds each parish website.
+3. Searches each parish website for a bulletin page or recent bulletin PDF.
+4. Downloads readable bulletin PDFs.
+5. Extracts event-like items from the bulletin text.
+6. Saves normalized events to events_data.json for the Streamlit website.
+
+Security note:
+- Do NOT hardcode your OpenAI API key in this file.
+- Optional AI extraction uses OPENAI_API_KEY from your environment or Streamlit secrets.
 """
 
+from __future__ import annotations
+
+import hashlib
 import json
 import os
-import requests
-from datetime import datetime, timedelta
-import hashlib
+import re
+import time
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Iterable
+from urllib.parse import urljoin, urlparse
 
-# For PDF parsing
+import pandas as pd
 import pdfplumber
-import PyPDF2
+import requests
+from bs4 import BeautifulSoup
 
-# For AI extraction (using free option)
-import openai
+try:
+    from openai import OpenAI
+except Exception:  # lets the app run without OpenAI installed/configured
+    OpenAI = None
 
-# ============================================
-# CONFIGURATION
-# ============================================
+PARISHES_URL = "https://www.diocesepb.org/parishes/parishes.html"
+OUTPUT_JSON = Path("events_data.json")
+BULLETIN_DIR = Path("bulletins")
+CACHE_DIR = Path("scraper_cache")
 
-# List of parish bulletin URLs (You'll need to add actual links)
-# These are examples - you'll need to find the actual bulletin pages
-PARISH_BULLETINS = {
-    "Cathedral of St. Ignatius Loyola": "https://www.stignatiuspb.org/bulletins",
-    "St. Ann Parish": "https://www.stannpb.org/bulletins",
-    "Holy Name of Jesus": "https://www.hnjpb.org/bulletin",
-    "St. Joseph Parish (Stuart)": "https://www.stjosephstuart.org/bulletins",
-    "St. Lucie Parish": "https://www.stlucieparish.org/bulletin",
-    "St. Anastasia": "https://www.stanastasia.org/bulletins",
-    "Holy Cross (Indiantown)": "https://www.holycrosscc.org/bulletins"
+HEADERS = {
+    "User-Agent": "Communio parish bulletin event browser (+contact parish office if needed) Mozilla/5.0"
 }
 
-# OpenAI API Key (you'll need to add yours)
-# Get from: https://platform.openai.com/api-keys
-OPENAI_API_KEY = "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"  # <-- YOU NEED TO ADD THIS
-
-# ============================================
-# AI PROMPT FOR EVENT EXTRACTION
-# ============================================
-
-EVENT_EXTRACTION_PROMPT = """
-You are an AI that extracts Catholic parish events from bulletin text.
-
-From the bulletin text below, extract all events happening in the coming week.
-
-For each event, provide:
-- event_name: The name of the event
-- date: When it happens (day of week or specific date)
-- time: What time it starts
-- location: Where in the parish it happens
-- category: Choose from: Mass, Confession, Adoration, Bible Study, Youth, Family, Retreat, Service, Fundraiser, Social, Other
-- description: A short 1-sentence description
-
-Return ONLY a JSON array. Example format:
-[
-    {
-        "event_name": "Eucharistic Adoration",
-        "date": "Friday",
-        "time": "6:30 PM",
-        "location": "Main Church",
-        "category": "Adoration",
-        "description": "Hour of silent prayer before the Blessed Sacrament"
-    }
+CATEGORY_OPTIONS = [
+    "Liturgy / Mass",
+    "Confession / Prayer",
+    "Adoration",
+    "Retreat",
+    "Youth / Young Adult",
+    "Marriage / Family",
+    "School / Open House",
+    "Service / Charity",
+    "Adult Formation",
+    "Social / Fellowship",
+    "Holiday / Holy Day",
 ]
 
-If no events found, return an empty array [].
+BULLETIN_KEYWORDS = [
+    "bulletin",
+    "bulletins",
+    "weekly bulletin",
+    "parish bulletin",
+    "publications",
+    "news",
+]
 
-Bulletin text:
-"""
+EVENT_KEYWORDS = [
+    "mass", "confession", "adoration", "holy hour", "rosary", "bible study", "study",
+    "youth", "young adult", "family", "marriage", "retreat", "mission", "fundraiser",
+    "breakfast", "dinner", "festival", "fellowship", "service", "charity", "drive",
+    "open house", "formation", "class", "meeting", "ministry", "prayer", "novena",
+]
 
-# ============================================
-# FUNCTIONS
-# ============================================
+DATE_WORDS = r"(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday|Mon\.?|Tue\.?|Tues\.?|Wed\.?|Thu\.?|Thur\.?|Fri\.?|Sat\.?|Sun\.?)"
+MONTH_WORDS = r"(?:Jan\.?|January|Feb\.?|February|Mar\.?|March|Apr\.?|April|May|Jun\.?|June|Jul\.?|July|Aug\.?|August|Sep\.?|Sept\.?|September|Oct\.?|October|Nov\.?|November|Dec\.?|December)"
+TIME_RE = r"(?:\d{1,2}(?::\d{2})?\s*(?:a\.m\.|p\.m\.|am|pm|AM|PM)|Noon|Midnight)"
 
-def download_bulletin(url, parish_name):
-    """Download a bulletin PDF from a URL"""
+
+def clean_text(value: str) -> str:
+    return re.sub(r"\s+", " ", value or "").strip()
+
+
+def normalize_name(value: str) -> str:
+    value = clean_text(value).replace("†", "")
+    value = value.replace("Saint ", "St. ").replace("Saint", "St.")
+    value = value.replace("Cathedral of Saint", "Cathedral of St.")
+    return clean_text(value.lower())
+
+
+def safe_filename(value: str) -> str:
+    return re.sub(r"[^A-Za-z0-9._-]+", "_", value).strip("_")[:120] or "bulletin"
+
+
+def infer_category(text: str) -> str:
+    t = (text or "").lower()
+    if any(w in t for w in ["mass", "holy thursday", "good friday", "easter vigil", "requiem"]):
+        return "Liturgy / Mass"
+    if any(w in t for w in ["adoration", "holy hour", "blessed sacrament"]):
+        return "Adoration"
+    if any(w in t for w in ["confession", "reconciliation", "rosary", "stations of the cross", "prayer", "novena"]):
+        return "Confession / Prayer"
+    if "retreat" in t or "mission" in t:
+        return "Retreat"
+    if any(w in t for w in ["youth", "young adult", "teen"]):
+        return "Youth / Young Adult"
+    if any(w in t for w in ["marriage", "family", "wedding", "parent"]):
+        return "Marriage / Family"
+    if any(w in t for w in ["school", "open house", "academy"]):
+        return "School / Open House"
+    if any(w in t for w in ["charity", "charities", "drive", "families in need", "food pantry", "service", "donation"]):
+        return "Service / Charity"
+    if any(w in t for w in ["bible study", "formation", "class", "theology", "catechism", "rcia", "ocia", "study"]):
+        return "Adult Formation"
+    if any(w in t for w in ["social", "fellowship", "festival", "breakfast", "dinner", "coffee", "bingo"]):
+        return "Social / Fellowship"
+    if any(w in t for w in ["christmas", "advent", "lent", "easter", "holy day", "pentecost", "assumption"]):
+        return "Holiday / Holy Day"
+    return "Adult Formation"
+
+
+def request_url(url: str, timeout: int = 25) -> requests.Response:
+    response = requests.get(url, headers=HEADERS, timeout=timeout, allow_redirects=True)
+    response.raise_for_status()
+    return response
+
+
+def fetch_parishes() -> pd.DataFrame:
+    response = request_url(PARISHES_URL)
+    soup = BeautifulSoup(response.text, "html.parser")
+    text = soup.get_text("\n")
+    lines = [clean_text(x) for x in text.splitlines() if clean_text(x)]
+
+    deanery_names = {"Northern Deanery", "Cathedral Deanery", "Central Deanery", "Southern Deanery"}
+    rows = []
+    current_deanery = None
+
+    i = 0
+    while i < len(lines):
+        line = lines[i].replace("†", "").strip()
+        if line in deanery_names:
+            current_deanery = line
+            i += 1
+            continue
+        if re.match(r"^\d+\.", line):
+            combined = line
+            while i + 1 < len(lines):
+                nxt = lines[i + 1].replace("†", "").strip()
+                if re.match(r"^\d+\.", nxt) or nxt in deanery_names or nxt == "Next section:":
+                    break
+                combined += " " + nxt
+                i += 1
+            combined = re.sub(r"^\d+\.\s*", "", combined).strip()
+            main_part = combined.split("Email:")[0].strip()
+            phone_match = re.search(r"(\d{3}-\d{3}-\d{4})", main_part)
+            phone = phone_match.group(1) if phone_match else ""
+            if phone:
+                main_part = main_part.replace(phone, "").strip(" ,")
+            parts = [p.strip() for p in main_part.split(",") if p.strip()]
+            parish = parts[0] if parts else ""
+            city = re.sub(r"\bFL\s+\d{5}\b", "", parts[-1]).strip(" ,") if len(parts) >= 2 else ""
+            rows.append({"parish": parish, "city": city, "deanery": current_deanery or "Unknown", "phone": phone})
+        i += 1
+
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return pd.DataFrame(columns=["parish", "city", "deanery", "phone", "website"])
+
+    website_map = {}
+    for a in soup.find_all("a", href=True):
+        name = clean_text(a.get_text(" ", strip=True)).replace("†", "")
+        href = a["href"].strip()
+        if not name or href.startswith(("mailto:", "javascript:")):
+            continue
+        website_map.setdefault(name, urljoin(PARISHES_URL, href))
+
+    df["website"] = df["parish"].map(website_map).fillna("")
+    return df[df["parish"] != ""].drop_duplicates(subset=["parish"]).reset_index(drop=True)
+
+
+def same_domain(url_a: str, url_b: str) -> bool:
+    a = urlparse(url_a).netloc.lower().replace("www.", "")
+    b = urlparse(url_b).netloc.lower().replace("www.", "")
+    return a == b
+
+
+def looks_like_pdf(url: str) -> bool:
+    path = urlparse(url).path.lower()
+    return path.endswith(".pdf") or ".pdf" in path
+
+
+def score_bulletin_link(text: str, href: str) -> int:
+    joined = f"{text} {href}".lower()
+    score = 0
+    for kw in BULLETIN_KEYWORDS:
+        if kw in joined:
+            score += 10
+    if looks_like_pdf(href):
+        score += 8
+    if any(w in joined for w in ["latest", "current", "week", "2026", "2025"]):
+        score += 2
+    return score
+
+
+def find_bulletin_candidates(parish_website: str, max_pages: int = 8) -> list[str]:
+    if not parish_website:
+        return []
+
+    queue = [parish_website]
+    seen = set()
+    candidates = []
+
+    # Try common bulletin paths first.
+    base = parish_website.rstrip("/") + "/"
+    queue.extend(urljoin(base, path) for path in ["bulletin", "bulletins", "parish-bulletin", "weekly-bulletin", "publications"])
+
+    while queue and len(seen) < max_pages:
+        url = queue.pop(0)
+        if url in seen:
+            continue
+        seen.add(url)
+        try:
+            response = request_url(url, timeout=20)
+        except Exception:
+            continue
+
+        content_type = response.headers.get("content-type", "").lower()
+        final_url = response.url
+        if "pdf" in content_type or looks_like_pdf(final_url):
+            candidates.append(final_url)
+            continue
+        if "html" not in content_type and "text" not in content_type:
+            continue
+
+        soup = BeautifulSoup(response.text, "html.parser")
+        links = []
+        for a in soup.find_all("a", href=True):
+            href = urljoin(final_url, a["href"].strip())
+            text = clean_text(a.get_text(" ", strip=True))
+            if href.startswith(("mailto:", "tel:", "javascript:")):
+                continue
+            if not same_domain(href, final_url) and not looks_like_pdf(href):
+                # many parishes host PDFs on same domain or on eCatholic/CDN; keep PDFs only off-domain
+                continue
+            score = score_bulletin_link(text, href)
+            if score > 0:
+                links.append((score, href))
+        links.sort(reverse=True, key=lambda x: x[0])
+        for _, href in links[:10]:
+            if looks_like_pdf(href):
+                candidates.append(href)
+            elif href not in seen and href not in queue:
+                queue.append(href)
+
+    # de-dupe while keeping order
+    deduped = []
+    for c in candidates:
+        if c not in deduped:
+            deduped.append(c)
+    return deduped[:5]
+
+
+def download_pdf(url: str, parish_name: str) -> Path | None:
     try:
-        response = requests.get(url, timeout=30)
-        if response.status_code == 200:
-            # Create bulletins folder if it doesn't exist
-            os.makedirs("bulletins", exist_ok=True)
-            
-            # Create a safe filename
-            safe_name = parish_name.replace(" ", "_").replace("(", "").replace(")", "")
-            filename = f"bulletins/{safe_name}_{datetime.now().strftime('%Y%m%d')}.pdf"
-            
-            with open(filename, "wb") as f:
-                f.write(response.content)
-            return filename
-        else:
-            print(f"Failed to download {parish_name}: Status {response.status_code}")
+        response = request_url(url, timeout=30)
+        content_type = response.headers.get("content-type", "").lower()
+        if "pdf" not in content_type and not looks_like_pdf(response.url):
             return None
-    except Exception as e:
-        print(f"Error downloading {parish_name}: {e}")
+        BULLETIN_DIR.mkdir(exist_ok=True)
+        digest = hashlib.md5(response.url.encode()).hexdigest()[:10]
+        filename = BULLETIN_DIR / f"{safe_filename(parish_name)}_{datetime.now().strftime('%Y%m%d')}_{digest}.pdf"
+        filename.write_bytes(response.content)
+        return filename
+    except Exception as exc:
+        print(f"   ❌ PDF download failed: {exc}")
         return None
 
-def extract_text_from_pdf(pdf_path):
-    """Extract text from a PDF file"""
+
+def extract_text_from_pdf(pdf_path: Path) -> str:
     text = ""
     try:
-        with pdfplumber.open(pdf_path) as pdf:
+        with pdfplumber.open(str(pdf_path)) as pdf:
             for page in pdf.pages:
-                page_text = page.extract_text()
-                if page_text:
-                    text += page_text + "\n"
-    except Exception as e:
-        print(f"Error extracting text from {pdf_path}: {e}")
+                page_text = page.extract_text(x_tolerance=1, y_tolerance=3) or ""
+                text += page_text + "\n"
+    except Exception as exc:
+        print(f"   ⚠️ Could not extract text from {pdf_path.name}: {exc}")
     return text
 
-def extract_events_with_ai(bulletin_text, parish_name):
-    """Use AI to extract events from bulletin text"""
-    if not OPENAI_API_KEY or OPENAI_API_KEY == "YOUR_API_KEY_HERE":
-        print(f"⚠️ No API key set. Skipping AI extraction for {parish_name}")
+
+def candidate_event_lines(text: str) -> list[str]:
+    raw_lines = [clean_text(x) for x in text.splitlines() if clean_text(x)]
+    lines = []
+    for line in raw_lines:
+        if len(line) < 8 or len(line) > 220:
+            continue
+        lower = line.lower()
+        has_keyword = any(k in lower for k in EVENT_KEYWORDS)
+        has_time = re.search(TIME_RE, line, re.I) is not None
+        has_date = re.search(DATE_WORDS, line, re.I) is not None or re.search(MONTH_WORDS + r"\s+\d{1,2}", line, re.I) is not None
+        if has_keyword and (has_time or has_date):
+            lines.append(line)
+    return lines[:80]
+
+
+def fallback_extract_events(text: str, parish_name: str, bulletin_url: str) -> list[dict]:
+    events = []
+    for line in candidate_event_lines(text):
+        time_match = re.search(TIME_RE, line, re.I)
+        dow_match = re.search(DATE_WORDS, line, re.I)
+        date_match = re.search(MONTH_WORDS + r"\s+\d{1,2}(?:,\s*\d{4})?", line, re.I)
+        date_label = clean_text(date_match.group(0) if date_match else dow_match.group(0) if dow_match else "See bulletin")
+        time_label = clean_text(time_match.group(0) if time_match else "See bulletin")
+        title = line
+        # remove leading dates/times to make a cleaner title
+        title = re.sub(DATE_WORDS + r"[:,]?\s*", "", title, flags=re.I)
+        title = re.sub(MONTH_WORDS + r"\s+\d{1,2}(?:,\s*\d{4})?[:,]?\s*", "", title, flags=re.I)
+        title = re.sub(TIME_RE, "", title, flags=re.I)
+        title = clean_text(title.strip(" -–—|:;")) or line
+        event_id = hashlib.md5(f"{parish_name}|{title}|{date_label}|{time_label}".encode()).hexdigest()
+        events.append({
+            "id": event_id,
+            "title": title[:140],
+            "date_label": date_label,
+            "time": time_label,
+            "location": parish_name,
+            "category": infer_category(line),
+            "parish": parish_name,
+            "description": line,
+            "source_url": bulletin_url,
+            "source_type": "bulletin",
+            "date_added": datetime.now(timezone.utc).isoformat(),
+        })
+    return events
+
+
+def extract_events_with_ai(text: str, parish_name: str, bulletin_url: str) -> list[dict]:
+    api_key = os.getenv("OPENAI_API_KEY", "").strip()
+    if not api_key or OpenAI is None:
         return []
-    
+
+    prompt = f"""
+Extract Catholic parish events from this bulletin text for {parish_name}.
+Return only valid JSON array. Use these exact category labels: {CATEGORY_OPTIONS}.
+Each item must have: title, date_label, time, location, category, description.
+Skip Mass intention names unless they are a public event. Keep events useful for a public parish event website.
+
+Bulletin text:
+{text[:12000]}
+"""
     try:
-        # Initialize OpenAI client
-        client = openai.OpenAI(api_key=OPENAI_API_KEY)
-        
-        # Truncate text if too long (keep last ~4000 characters where events usually are)
-        if len(bulletin_text) > 4000:
-            bulletin_text = bulletin_text[-4000:]
-        
+        client = OpenAI(api_key=api_key)
         response = client.chat.completions.create(
-            model="gpt-3.5-turbo",
+            model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
             messages=[
-                {"role": "system", "content": "You extract events from Catholic church bulletins. Return only JSON."},
-                {"role": "user", "content": EVENT_EXTRACTION_PROMPT + bulletin_text}
+                {"role": "system", "content": "You extract structured event listings from Catholic parish bulletins. Return JSON only."},
+                {"role": "user", "content": prompt},
             ],
-            temperature=0.3
+            temperature=0.1,
         )
-        
-        # Parse the response
-        events_text = response.choices[0].message.content
-        # Clean up the response (remove markdown code blocks if present)
-        events_text = events_text.replace("```json", "").replace("```", "")
-        events = json.loads(events_text)
-        return events
-    except Exception as e:
-        print(f"Error with AI extraction for {parish_name}: {e}")
+        raw = response.choices[0].message.content or "[]"
+        raw = raw.replace("```json", "").replace("```", "").strip()
+        parsed = json.loads(raw)
+        out = []
+        for item in parsed if isinstance(parsed, list) else []:
+            title = clean_text(str(item.get("title") or item.get("event_name") or ""))
+            if not title:
+                continue
+            event_id = hashlib.md5(f"{parish_name}|{title}|{item.get('date_label','')}|{item.get('time','')}".encode()).hexdigest()
+            out.append({
+                "id": event_id,
+                "title": title[:140],
+                "date_label": clean_text(str(item.get("date_label") or item.get("date") or "See bulletin")),
+                "time": clean_text(str(item.get("time") or "See bulletin")),
+                "location": clean_text(str(item.get("location") or parish_name)),
+                "category": item.get("category") if item.get("category") in CATEGORY_OPTIONS else infer_category(title),
+                "parish": parish_name,
+                "description": clean_text(str(item.get("description") or "")),
+                "source_url": bulletin_url,
+                "source_type": "bulletin",
+                "date_added": datetime.now(timezone.utc).isoformat(),
+            })
+        return out
+    except Exception as exc:
+        print(f"   ⚠️ AI extraction failed for {parish_name}: {exc}")
         return []
 
-def save_events(parish_name, events):
-    """Save extracted events to the master JSON file"""
-    # Load existing events
-    if os.path.exists("events_data.json"):
-        with open("events_data.json", "r") as f:
-            all_events = json.load(f)
-    else:
-        all_events = {}
-    
-    # Add timestamp
-    for event in events:
-        event["parish"] = parish_name
-        event["date_added"] = datetime.now().isoformat()
-        # Create a unique ID for each event
-        event_id = hashlib.md5(f"{parish_name}{event['event_name']}{event['date']}".encode()).hexdigest()
-        event["id"] = event_id
-    
-    all_events[parish_name] = {
-        "last_updated": datetime.now().isoformat(),
-        "events": events
+
+def load_existing_events(path: Path = OUTPUT_JSON) -> dict:
+    if path.exists():
+        try:
+            return json.loads(path.read_text())
+        except Exception:
+            return {}
+    return {}
+
+
+def save_events_for_parish(parish_name: str, events: list[dict], bulletin_url: str, path: Path = OUTPUT_JSON) -> None:
+    data = load_existing_events(path)
+    data[parish_name] = {
+        "last_updated": datetime.now(timezone.utc).isoformat(),
+        "bulletin_url": bulletin_url,
+        "events": events,
     }
-    
-    # Save back
-    with open("events_data.json", "w") as f:
-        json.dump(all_events, f, indent=2)
-    
-    print(f"✅ Saved {len(events)} events for {parish_name}")
+    path.write_text(json.dumps(data, indent=2, ensure_ascii=False))
 
-def run_scraper():
-    """Main function to run the AI scraper"""
-    print("=" * 50)
-    print("🤖 AI Event Scraper - Diocese of Palm Beach")
-    print(f"📅 Running on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print("=" * 50)
-    
+
+def run_scraper(limit: int | None = None, use_ai: bool = True, sleep_seconds: float = 0.7) -> dict:
+    print("=" * 58)
+    print("Communio Bulletin Scraper - Diocese of Palm Beach")
+    print(datetime.now().strftime("Started: %Y-%m-%d %H:%M:%S"))
+    print("=" * 58)
+
+    parishes = fetch_parishes()
+    if limit:
+        parishes = parishes.head(limit)
+
     total_events = 0
-    
-    for parish_name, url in PARISH_BULLETINS.items():
-        print(f"\n📋 Processing: {parish_name}")
-        
-        # Step 1: Download bulletin
-        print(f"   📥 Downloading from {url}...")
-        pdf_path = download_bulletin(url, parish_name)
-        
-        if not pdf_path:
-            print(f"   ❌ Could not download bulletin")
-            continue
-        
-        # Step 2: Extract text
-        print(f"   📄 Extracting text from PDF...")
-        bulletin_text = extract_text_from_pdf(pdf_path)
-        
-        if len(bulletin_text) < 100:
-            print(f"   ⚠️ Very little text extracted (might be scanned PDF)")
-            continue
-        
-        # Step 3: Use AI to extract events
-        print(f"   🧠 Using AI to extract events...")
-        events = extract_events_with_ai(bulletin_text, parish_name)
-        
-        if events:
-            # Step 4: Save events
-            save_events(parish_name, events)
-            total_events += len(events)
-            print(f"   ✅ Extracted {len(events)} events")
-            
-            # Print preview
-            for event in events[:2]:  # Show first 2 events
-                print(f"      - {event.get('event_name', 'Unknown')} ({event.get('category', 'Other')})")
-        else:
-            print(f"   ⚠️ No events found")
-    
-    print("\n" + "=" * 50)
-    print(f"🎉 SCRAPING COMPLETE!")
-    print(f"📊 Total events extracted: {total_events}")
-    print("=" * 50)
+    processed = 0
+    failed = []
 
-# ============================================
-# RUN THE SCRAPER
-# ============================================
+    for _, row in parishes.iterrows():
+        parish_name = row.get("parish", "")
+        website = row.get("website", "")
+        print(f"\n⛪ {parish_name}")
+        print(f"   Website: {website or 'not listed'}")
+        if not website:
+            failed.append({"parish": parish_name, "reason": "No website listed"})
+            continue
+
+        candidates = find_bulletin_candidates(website)
+        if not candidates:
+            print("   ⚠️ No bulletin candidates found")
+            failed.append({"parish": parish_name, "reason": "No bulletin link found"})
+            continue
+
+        parish_events = []
+        used_url = candidates[0]
+        for bulletin_url in candidates:
+            print(f"   Trying bulletin: {bulletin_url}")
+            pdf_path = download_pdf(bulletin_url, parish_name)
+            if not pdf_path:
+                continue
+            text = extract_text_from_pdf(pdf_path)
+            if len(text) < 100:
+                print("   ⚠️ PDF had too little extractable text; it may be scanned images")
+                continue
+            used_url = bulletin_url
+            parish_events = extract_events_with_ai(text, parish_name, bulletin_url) if use_ai else []
+            if not parish_events:
+                parish_events = fallback_extract_events(text, parish_name, bulletin_url)
+            break
+
+        save_events_for_parish(parish_name, parish_events, used_url)
+        processed += 1
+        total_events += len(parish_events)
+        print(f"   ✅ Saved {len(parish_events)} bulletin events")
+        time.sleep(sleep_seconds)
+
+    summary = {"processed_parishes": processed, "total_events": total_events, "failed": failed}
+    print("\nDone:", summary)
+    return summary
+
+
 if __name__ == "__main__":
-    run_scraper()
+    # Use LIMIT_PARISHES=5 for testing.
+    limit_value = os.getenv("LIMIT_PARISHES", "").strip()
+    limit = int(limit_value) if limit_value.isdigit() else None
+    run_scraper(limit=limit, use_ai=os.getenv("USE_AI", "1") != "0")
