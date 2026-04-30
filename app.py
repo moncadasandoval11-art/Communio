@@ -29,6 +29,8 @@ DIOCESE_HOME = "https://www.diocesepb.org/"
 DIOCESE_EVENTS = "https://www.diocesepb.org/news/events.html"
 BISHOP_MESSAGE = "https://www.diocesepb.org/about-us/office-of-the-bishop.html"
 ST_THOMAS_MORE_BULLETIN = "https://www.flipsnack.com/stmbb/st-thomas-more-catholic-church-april-2026-bulletin"
+BISHOP_IMAGE_FILE = "Headshot2-Chosen-FrRodriguez.jpg.webp"
+BISHOP_WELCOME = "Dear brothers and sisters in Christ, How beautiful is our Church! How beautiful it is to walk in the path of Christ Jesus in the company of so many beloved brothers and sisters! How beautiful is the Diocese of Palm Beach!"
 
 
 CATEGORY_OPTIONS = [
@@ -393,6 +395,41 @@ div[data-testid="stMetric"] {
 )
 
 
+
+st.markdown(
+    """
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Cinzel:wght@500;700&family=Inter:wght@400;500;600;700;800&display=swap');
+.stApp { background: radial-gradient(circle at 15% 5%, rgba(108,203,213,.32), transparent 28%), radial-gradient(circle at 85% 0%, rgba(244,223,184,.38), transparent 25%), linear-gradient(180deg, #dff7f8 0%, #eef8f3 34%, #fff8ec 100%) !important; color: #12313f; }
+.hero { border: 1px solid rgba(11,95,127,.16) !important; background: linear-gradient(135deg, rgba(255,255,255,.92), rgba(255,248,236,.78)) !important; box-shadow: 0 26px 70px rgba(7,56,79,.16) !important; border-radius: 34px; }
+.logo-mark { background: linear-gradient(160deg, #0b5f7f 0%, #58bdcb 58%, #f4dfb8 100%) !important; color: white !important; }
+.logo-title { color: #07384f !important; }
+.logo-subtitle, .small-muted, .meta, .quick-card p { color: #557080 !important; }
+.quick-card, .event-card, .parish-card, .bishop-card, .find-panel { border: 1px solid rgba(11,95,127,.13) !important; background: rgba(255,255,255,.78) !important; box-shadow: 0 13px 30px rgba(7,56,79,.08) !important; }
+.event-title, .parish-title { color: #07384f !important; }
+.quick-card a, .pill { color: #0b5f7f !important; }
+.pill { background: rgba(108,203,213,.18) !important; border-color: rgba(11,95,127,.16) !important; }
+.home-grid { display: grid; grid-template-columns: 1.05fr 1.15fr; gap: 1rem; margin-top: 1.25rem; }
+.bishop-card { display: grid; grid-template-columns: 120px 1fr; gap: 1rem; align-items: center; border-radius: 22px; padding: 1rem; background: linear-gradient(135deg, rgba(255,255,255,.88), rgba(244,223,184,.55)) !important; }
+.bishop-card img { width: 120px; height: 120px; object-fit: cover; border-radius: 26px; border: 4px solid white; box-shadow: 0 12px 30px rgba(7,56,79,.18); }
+.bishop-kicker { color: #0b5f7f; font-weight: 800; font-size: .8rem; letter-spacing: .08em; text-transform: uppercase; }
+.bishop-quote { color: #12313f; font-size: .98rem; line-height: 1.45; margin-top: .25rem; }
+.slideshow-card { min-height: 188px; position: relative; overflow: hidden; border-radius: 22px; padding: 1rem; margin-top:.75rem; background: linear-gradient(135deg, rgba(11,95,127,.95), rgba(71,180,196,.86)); color: white; }
+.slide { position: absolute; inset: 1rem; opacity: 0; transform: translateX(20px); animation: eventSlide 24s infinite; }
+.slide:nth-child(1) { animation-delay: 0s; } .slide:nth-child(2) { animation-delay: 6s; } .slide:nth-child(3) { animation-delay: 12s; } .slide:nth-child(4) { animation-delay: 18s; }
+@keyframes eventSlide { 0% { opacity: 0; transform: translateX(20px); } 6% { opacity: 1; transform: translateX(0); } 22% { opacity: 1; transform: translateX(0); } 28% { opacity: 0; transform: translateX(-20px); } 100% { opacity: 0; transform: translateX(-20px); } }
+.slide-kicker { color: #f4dfb8; font-size: .78rem; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
+.slide-title { font-size: 1.35rem; font-weight: 800; margin: .3rem 0; }
+.slide-meta { color: rgba(255,255,255,.88); font-size: .95rem; }
+.find-panel { border-radius: 28px; padding: 1.15rem 1.25rem; margin: 1rem 0 1.2rem 0; }
+.panel-title { font-family: 'Cinzel', serif; color: #07384f; font-size: 1.45rem; font-weight: 700; margin-bottom: .2rem; }
+.panel-subtitle { color: #557080; margin-bottom: .8rem; }
+@media (max-width: 950px) { .home-grid { grid-template-columns: 1fr; } .bishop-card { grid-template-columns: 1fr; } }
+</style>
+""",
+    unsafe_allow_html=True,
+)
+
 # ============================================================
 # HELPERS
 # ============================================================
@@ -410,6 +447,30 @@ def add_ids(events: list[dict]) -> list[dict]:
         copy.setdefault("date_added", "seeded")
         out.append(copy)
     return out
+
+
+def make_home_slides(events: list[dict]) -> str:
+    if not events:
+        return ""
+    slides = []
+    for event in events[:4]:
+        slides.append(f"""
+        <div class="slide">
+            <div class="slide-kicker">Featured parish event</div>
+            <div class="slide-title">{event.get('title', '')}</div>
+            <div class="slide-meta">🗓️ {event.get('date_label', 'Date not listed')} {(' · ' + event.get('time', '')) if event.get('time') else ''}</div>
+            <div class="slide-meta">📍 {event.get('location') or event.get('parish') or 'Location not listed'}</div>
+        </div>
+        """)
+    return "\n".join(slides)
+
+
+def bishop_image_src() -> str:
+    import base64
+    image_path = Path(__file__).with_name(BISHOP_IMAGE_FILE)
+    if image_path.exists():
+        return "data:image/webp;base64," + base64.b64encode(image_path.read_bytes()).decode("utf-8")
+    return ""
 
 
 def load_manual_events() -> list[dict]:
@@ -612,29 +673,47 @@ if not events_df.empty:
 # HERO
 # ============================================================
 
+home_slides_html = make_home_slides(seeded_events)
+bishop_src = bishop_image_src()
+
 st.markdown(
     f"""
 <div class="hero">
     <div class="logo-wrap">
-        <div class="logo-mark">✦</div>
+        <div class="logo-mark">☩</div>
         <div>
             <h1 class="logo-title">COMMUNIO</h1>
-            <div class="logo-subtitle">One living map of parish life across the Diocese of Palm Beach.</div>
+            <div class="logo-subtitle">A coastal Catholic guide to parish life across the Diocese of Palm Beach.</div>
         </div>
     </div>
 
-    <div class="quick-grid">
-        <div class="quick-card">
-            <a href="{DIOCESE_HOME}" target="_blank">Diocese Website</a>
-            <p>Official diocesan homepage, offices, ministries, news, and resources.</p>
+    <div class="home-grid">
+        <div class="quick-grid">
+            <div class="quick-card">
+                <a href="{DIOCESE_HOME}" target="_blank">Diocese Website</a>
+                <p>Official diocesan homepage, offices, ministries, news, and resources.</p>
+            </div>
+            <div class="quick-card">
+                <a href="{DIOCESE_EVENTS}" target="_blank">Diocesan Calendar</a>
+                <p>Quick jump to official diocesan events.</p>
+            </div>
+            <div class="quick-card">
+                <a href="{BISHOP_MESSAGE}" target="_blank">Office of the Bishop</a>
+                <p>Pastoral updates, diocesan leadership, and messages from the bishop.</p>
+            </div>
         </div>
-        <div class="quick-card">
-            <a href="{DIOCESE_EVENTS}" target="_blank">Diocesan Calendar</a>
-            <p>Quick jump to official diocesan events.</p>
-        </div>
-        <div class="quick-card">
-            <a href="{BISHOP_MESSAGE}" target="_blank">Message from the Bishop</a>
-            <p>A dedicated space for the bishop’s pastoral voice and diocesan updates.</p>
+
+        <div>
+            <div class="bishop-card">
+                <img src="{bishop_src}" alt="Bishop Manuel de Jesús Rodríguez">
+                <div>
+                    <div class="bishop-kicker">Welcome from the Bishop</div>
+                    <div class="bishop-quote">{BISHOP_WELCOME}</div>
+                </div>
+            </div>
+            <div class="slideshow-card">
+                {home_slides_html}
+            </div>
         </div>
     </div>
 </div>
@@ -642,28 +721,47 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+st.markdown(
+    """
+<div class="find-panel">
+    <div class="panel-title">Find an Event</div>
+    <div class="panel-subtitle">Search by category, parish, deanery, or keyword. Events below update as you filter.</div>
+</div>
+""",
+    unsafe_allow_html=True,
+)
+
+finder_col1, finder_col2, finder_col3 = st.columns([1.2, 1, 1])
+with finder_col1:
+    main_search = st.text_input("Search events", placeholder="adoration, Bible study, youth, Boynton...")
+with finder_col2:
+    main_category = st.selectbox("Event category", CATEGORY_OPTIONS)
+with finder_col3:
+    main_deanery = st.selectbox("Deanery", ["All"] + sorted(parishes_df["deanery"].unique()))
+
+finder_col4, finder_col5 = st.columns([1, 1])
+with finder_col4:
+    main_parish_choice = st.selectbox("Parish", ["All"] + sorted(parishes_df["parish"].unique()))
+with finder_col5:
+    quick_view = st.radio("View", ["Events", "Parishes", "Manual Upload", "Add Event"], horizontal=True)
 
 # ============================================================
 # SIDEBAR
 # ============================================================
 
 with st.sidebar:
-    st.header("Explore")
-
-    view = st.radio(
-        "View",
-        ["Events", "Parishes", "Manual Upload", "Add Event"],
-        index=0,
-    )
-
-    search = st.text_input("Search", placeholder="Bible study, Boynton, adoration...")
-    category = st.selectbox("Category", CATEGORY_OPTIONS)
-    deanery = st.selectbox("Deanery", ["All"] + sorted(parishes_df["deanery"].unique()))
-    parish_choice = st.selectbox("Parish", ["All"] + sorted(parishes_df["parish"].unique()))
-
-    st.divider()
+    st.header("Communio")
     st.caption("No API key required. Events shown here include seeded/manual bulletin entries plus anything you add through the form.")
+    st.divider()
+    st.markdown(f"[Diocese Website]({DIOCESE_HOME})")
+    st.markdown(f"[Diocesan Calendar]({DIOCESE_EVENTS})")
+    st.markdown(f"[Office of the Bishop]({BISHOP_MESSAGE})")
 
+view = quick_view
+search = main_search
+category = main_category
+deanery = main_deanery
+parish_choice = main_parish_choice
 
 # ============================================================
 # FILTERS
@@ -693,12 +791,7 @@ if search:
 # ============================================================
 
 if view == "Events":
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Events", len(filtered_events))
-    c2.metric("Parishes", len(parishes_df))
-    c3.metric("Manual system", "Enabled")
-
-    st.subheader("Parish and Diocesan Events")
+    st.subheader(f"Parish and Diocesan Events ({len(filtered_events)} found)")
 
     if filtered_events.empty:
         st.info("No events match your filters.")
