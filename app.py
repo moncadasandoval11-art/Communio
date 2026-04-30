@@ -451,7 +451,7 @@ def find_bulletin_on_parish_website(website_url: str) -> str:
                 except:
                     continue
                     
-    except Exception as e:
+    except Exception:
         pass
     
     return ""
@@ -1076,23 +1076,21 @@ elif view_mode == "Events":
 
 
 elif view_mode == "Manual Upload":
-    st.subheader("Manual Bulletin Upload")
+    st.subheader("📤 Manual Bulletin Upload & AI Extraction")
 
     st.write(
-        "Upload bulletin PDFs here. The website will read the PDF, extract parish events with AI, "
-        "save them into `events_data.json`, and then show them on the Dashboard and Events pages."
+        "Upload bulletin PDFs or auto-discover them. The AI will extract parish events "
+        "and save them to `events_data.json`."
     )
 
     if not OPENAI_API_KEY:
-        st.warning(
-            "OPENAI_API_KEY is missing. Add it before using the AI extractor."
-        )
+        st.warning("⚠️ OPENAI_API_KEY is missing. Add it before using the AI extractor.")
 
-    # New: Add tabs for different upload methods
-    tab1, tab2, tab3 = st.tabs(["📤 Upload PDF", "🔍 Auto-Discover Bulletin", "📋 Batch from Parish List"])
+    # Tabs for different upload methods
+    tab1, tab2, tab3 = st.tabs(["📤 Upload PDF", "🔍 Auto-Discover", "📋 Batch Process"])
     
     with tab1:
-        st.markdown("### Upload Bulletin PDF")
+        st.markdown("### Upload Bulletin PDF Manually")
         
         parish_options = ["Type manually"] + sorted(parishes_df["parish"].dropna().unique().tolist())
         parish_choice = st.selectbox("Choose parish", parish_options, key="tab1_parish")
@@ -1106,9 +1104,10 @@ elif view_mode == "Manual Upload":
             "Upload one or more bulletin PDFs",
             type=["pdf"],
             accept_multiple_files=True,
+            key="tab1_uploader"
         )
 
-        if st.button("Read bulletin and update website", key="tab1_button"):
+        if st.button("📖 Extract Events from PDFs", key="tab1_button"):
             if not parish_name:
                 st.error("Please enter or choose the parish name first.")
             elif not uploaded_pdfs:
@@ -1117,14 +1116,12 @@ elif view_mode == "Manual Upload":
                 total_added = 0
 
                 for uploaded_pdf in uploaded_pdfs:
-                    st.write(f"Reading: **{uploaded_pdf.name}**")
-                    bulletin_text = extract_text_from_pdf(uploaded_pdf)
+                    with st.spinner(f"Processing: {uploaded_pdf.name}..."):
+                        st.write(f"Reading: **{uploaded_pdf.name}**")
+                        bulletin_text = extract_text_from_pdf(uploaded_pdf)
 
-                    if len(bulletin_text) < 100:
-                        st.warning(
-                            f"Could not extract enough text from {uploaded_pdf.name}. "
-                            "It may be a scanned PDF."
-                        )
-                        continue
+                        if len(bulletin_text) < 100:
+                            st.warning(f"⚠️ Could not extract enough text from {uploaded_pdf.name}. It may be a scanned PDF.")
+                            continue
 
-                    events = extract_events_with_ai(bulletin_text
+                        events = extract_events
