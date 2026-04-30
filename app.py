@@ -27,6 +27,7 @@ st.set_page_config(page_title="Communio", page_icon="⛪", layout="wide")
 PARISHES_URL = "https://www.diocesepb.org/parishes/parishes.html"
 EVENTS_URL_TEMPLATE = "https://www.diocesepb.org/news/events.html/calendar/{year}/{month}"
 EVENTS_DATA_FILE = "events_data.json"
+BULLETIN_CACHE_DIR = "bulletin_cache"  # New: directory for cached bulletins
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
@@ -419,14 +420,166 @@ def fetch_events(year: int, month: int, parish_names: list[str]) -> pd.DataFrame
 
 
 # ============================================================
-# MANUAL BULLETIN UPLOAD FUNCTIONS
+# NEW: BULLETIN DISCOVERY FUNCTIONS
 # ============================================================
 
-def extract_text_from_uploaded_pdf(uploaded_file) -> str:
+def find_bulletin_on_parish_website(website_url: str) -> str:
+    """Search a parish website for bulletin PDF links."""
+    try:
+        headers = {"User-Agent": "Mozilla/5.0"}
+        response = requests.get(website_url, headers=headers, timeout=15)
+        soup = BeautifulSoup(response.text, "html.parser")
+        
+        for a in soup.find_all("a", href=True):
+            href = a["href"].lower()
+            text = a.get_text(" ", strip=True).lower()
+            
+            if "bulletin" in text or "bulletin" in href:
+                if href.endswith(".pdf"):
+                    return urljoin(website_url, a["href"])
+        
+        # Also check for bulletin pages that might contain PDFs
+        for a in soup.find_all("a", href=True):
+            text = a.get_text(" ", strip=True).lower()
+            if "bulletin" in text:
+                bulletin_page_url = urljoin(website_url, a["href"])
+                try:
+                    page_response = requests.get(bulletin_page_url, headers=headers, timeout=10)
+                    page_soup = BeautifulSoup(page_response.text, "html.parser")
+                    for pdf_link in page_soup.find_all("a", href=True):
+                        if pdf_link["href"].lower().endswith(".pdf"):
+                            return urljoin(bulletin_page_url, pdf_link["href"])
+                except:
+                    continue
+                    
+    except Exception as e:
+        st.warning(f"Could not search parish website: {e}")
+    
+    return ""
+
+
+def find_discovermass_page(parish_name: str) -> str:
+    """Search Google for the parish's DiscoverMass page."""
+    try:
+        query = f"{parish_name} Palm Beach Florida DiscoverMass"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        
+        response = requests.get(
+            "https://www.google.com/search",
+            params={"q": query},
+            headers=headers,
+            timeout=10
+        )
+        
+        # Extract DiscoverMass URLs from search results
+        matches = re.findall(r"https://discovermass\.com/church/[^&\"'> ]+", response.text)
+        if matches:
+            return matches[0]
+            
+    except Exception as e:
+        st.warning(f"DiscoverMass search failed: {e}")
+    
+    return ""
+
+
+def find_bulletin_on_discovermass(discovermass_url: str) -> str:
+    """Search a DiscoverMass page for bulletin PDF links."""
+    try:
+        headers = {"User-Agent": "Mozilla/5.0"}
+        response = requests.get(discovermass_url, headers=headers, timeout=15)
+        soup = BeautifulSoup(response.text, "html.parser")
+        
+        for a in soup.find_all("a", href=True):
+            href = a["href"]
+            if ".pdf" in href.lower():
+                return urljoin(discovermass_url, href)
+                
+    except Exception as e:
+        st.warning(f"Could not search DiscoverMass page: {e}")
+    
+    return ""
+
+
+def download_bulletin_pdf(pdf_url: str, parish_name: str) -> str:
+    """Download a bulletin PDF and save it locally."""
+    os.makedirs(BULLETIN_CACHE_DIR, exist_ok=True)
+    
+    # Create a safe filename
+    safe_name = re.sub(r"[^a-zA-Z0-9]", "_", parish_name)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    file_path = os.path.join(BULLETIN_CACHE_DIR, f"{safe_name}_{timestamp}.pdf")
+    
+    try:
+        headers = {"User-Agent": "Mozilla/5.0"}
+        response = requests.get(pdf_url, headers=headers, timeout=30)
+        response.raise_for_status()
+        
+        with open(file_path, "wb") as f:
+            f.write(response.content)
+        
+        return file_path
+        
+    except Exception as e:
+        st.error(f"Failed to download bulletin: {e}")
+        return ""
+
+
+def auto_discover_bulletin(parish_name: str, website_url: str = "") -> dict:
+    """Automatically discover bulletin PDFs for a parish."""
+    result = {
+        "found": False,
+        "pdf_path": "",
+        "source": "",
+        "method": ""
+    }
+    
+    # Method 1: Check parish website
+    if website_url:
+        st.info(f"🔍 Searching parish website for bulletin...")
+        bulletin_url = find_bulletin_on_parish_website(website_url)
+        
+        if bulletin_url:
+            st.success(f"✅ Found bulletin on parish website: {bulletin_url}")
+            pdf_path = download_bulletin_pdf(bulletin_url, parish_name)
+            if pdf_path:
+                result["found"] = True
+                result["pdf_path"] = pdf_path
+                result["source"] = bulletin_url
+                result["method"] = "Parish website"
+                return result
+    
+    # Method 2: Check DiscoverMass
+    st.info(f"🔍 Searching DiscoverMass for {parish_name}...")
+    dm_url = find_discovermass_page(parish_name)
+    
+    if dm_url:
+        st.success(f"✅ Found DiscoverMass page: {dm_url}")
+        bulletin_url = find_bulletin_on_discovermass(dm_url)
+        
+        if bulletin_url:
+            st.success(f"✅ Found bulletin on DiscoverMass: {bulletin_url}")
+            pdf_path = download_bulletin_pdf(bulletin_url, parish_name)
+            if pdf_path:
+                result["found"] = True
+                result["pdf_path"] = pdf_path
+                result["source"] = bulletin_url
+                result["method"] = "DiscoverMass"
+                return result
+    
+    st.warning(f"❌ No bulletin found for {parish_name}")
+    return result
+
+
+# ============================================================
+# MANUAL BULLETIN UPLOAD FUNCTIONS (Enhanced)
+# ============================================================
+
+def extract_text_from_pdf(file_path_or_object) -> str:
+    """Extract text from a PDF file (supports both file path and uploaded file)."""
     text = ""
 
     try:
-        with pdfplumber.open(uploaded_file) as pdf:
+        with pdfplumber.open(file_path_or_object) as pdf:
             for page in pdf.pages:
                 page_text = page.extract_text()
                 if page_text:
@@ -437,7 +590,7 @@ def extract_text_from_uploaded_pdf(uploaded_file) -> str:
     return text
 
 
-def extract_events_with_ai(bulletin_text: str, parish_name: str) -> list[dict]:
+def extract_events_with_ai(bulletin_text: str, parish_name: str, bulletin_source: str = "") -> list[dict]:
     if not OPENAI_API_KEY:
         st.error("Missing OPENAI_API_KEY. Add it to your environment variables or Streamlit secrets.")
         return []
@@ -470,8 +623,8 @@ def extract_events_with_ai(bulletin_text: str, parish_name: str) -> list[dict]:
     cleaned_events = []
 
     for event in events:
-        title = clean_text(event.get("title", ""))
-        date_label = clean_text(event.get("date_label", ""))
+        title = clean_text(event.get("title", event.get("event_name", "")))
+        date_label = clean_text(event.get("date_label", event.get("date", "")))
         time_text = clean_text(event.get("time", ""))
         category = clean_text(event.get("category", "Other"))
 
@@ -496,8 +649,8 @@ def extract_events_with_ai(bulletin_text: str, parish_name: str) -> list[dict]:
                 "category": category,
                 "description": clean_text(event.get("description", "")),
                 "parish": parish_name,
-                "source": "Manual bulletin upload",
-                "source_url": "",
+                "source": f"Manual bulletin upload{f' - {bulletin_source}' if bulletin_source else ''}",
+                "source_url": bulletin_source,
                 "date_added": datetime.now().isoformat(),
             }
         )
@@ -594,6 +747,63 @@ def save_uploaded_events(parish_name: str, events: list[dict]):
         json.dump(data, f, indent=2)
 
     return len(new_events)
+
+
+# ============================================================
+# NEW: BATCH PROCESSING FUNCTION
+# ============================================================
+
+def process_batch_bulletins(parish_names: list[str], parishes_df: pd.DataFrame, progress_bar) -> dict:
+    """Process bulletins for multiple parishes automatically."""
+    results = {
+        "total_parishes": len(parish_names),
+        "bulletins_found": 0,
+        "bulletins_processed": 0,
+        "total_events": 0,
+        "errors": []
+    }
+    
+    for idx, parish_name in enumerate(parish_names):
+        progress_bar.progress((idx) / len(parish_names), 
+                            f"Processing {parish_name}...")
+        
+        # Get parish website if available
+        parish_row = parishes_df[parishes_df["parish"] == parish_name]
+        website = parish_row.iloc[0]["website"] if not parish_row.empty else ""
+        
+        # Try to find bulletin
+        bulletin_result = auto_discover_bulletin(parish_name, website)
+        
+        if not bulletin_result["found"]:
+            results["errors"].append(f"No bulletin found for {parish_name}")
+            continue
+            
+        results["bulletins_found"] += 1
+        
+        # Extract text
+        text = extract_text_from_pdf(bulletin_result["pdf_path"])
+        
+        if len(text) < 100:
+            results["errors"].append(f"Could not extract text from {parish_name}")
+            continue
+            
+        # Extract events with AI
+        events = extract_events_with_ai(
+            text, 
+            parish_name, 
+            bulletin_result["source"]
+        )
+        
+        if events:
+            added = save_uploaded_events(parish_name, events)
+            results["bulletins_processed"] += 1
+            results["total_events"] += added
+            st.success(f"✅ {parish_name}: {added} events added ({bulletin_result['method']})")
+        else:
+            results["errors"].append(f"No events found in {parish_name} bulletin")
+    
+    progress_bar.progress(1.0, "Complete!")
+    return results
 
 
 # ============================================================
@@ -720,7 +930,7 @@ with st.sidebar:
 
     view_mode = st.radio(
         "View",
-        ["Dashboard", "Parishes", "Events", "Manual Upload"],
+        ["Dashboard", "Parishes", "Events", "Manual Upload", "Batch Processing"],
         index=0,
     )
 
@@ -909,104 +1119,4 @@ elif view_mode == "Parishes":
         for deanery, group in display_df.groupby("deanery"):
             st.markdown(f"### {deanery}")
 
-            for _, row in group.iterrows():
-                render_parish_card(row)
-
-
-elif view_mode == "Events":
-    st.subheader("Events")
-
-    st.caption("This includes diocesan calendar events and events extracted from manually uploaded bulletins.")
-
-    if filtered_events.empty:
-        st.info("No events matched the current filters.")
-    else:
-        for date_label, group in filtered_events.groupby("date_label", sort=False):
-            with st.expander(date_label if date_label else "No date listed"):
-                for _, row in group.iterrows():
-                    render_event_card(row)
-
-
-elif view_mode == "Manual Upload":
-    st.subheader("Manual Bulletin Upload")
-
-    st.write(
-        "Upload bulletin PDFs here. The website will read the PDF, extract parish events with AI, "
-        "save them into `events_data.json`, and then show them on the Dashboard and Events pages."
-    )
-
-    if not OPENAI_API_KEY:
-        st.warning(
-            "OPENAI_API_KEY is missing. Add it before using the AI extractor."
-        )
-
-    parish_options = ["Type manually"] + sorted(parishes_df["parish"].dropna().unique().tolist())
-
-    parish_choice = st.selectbox("Choose parish", parish_options)
-
-    if parish_choice == "Type manually":
-        parish_name = st.text_input("Parish name", placeholder="Example: St. Ann Parish")
-    else:
-        parish_name = parish_choice
-
-    uploaded_pdfs = st.file_uploader(
-        "Upload one or more bulletin PDFs",
-        type=["pdf"],
-        accept_multiple_files=True,
-    )
-
-    if st.button("Read bulletin and update website"):
-        if not parish_name:
-            st.error("Please enter or choose the parish name first.")
-
-        elif not uploaded_pdfs:
-            st.error("Please upload at least one PDF.")
-
-        else:
-            total_added = 0
-
-            for uploaded_pdf in uploaded_pdfs:
-                st.write(f"Reading: **{uploaded_pdf.name}**")
-
-                bulletin_text = extract_text_from_uploaded_pdf(uploaded_pdf)
-
-                if len(bulletin_text) < 100:
-                    st.warning(
-                        f"Could not extract enough text from {uploaded_pdf.name}. "
-                        "It may be a scanned PDF."
-                    )
-                    continue
-
-                events = extract_events_with_ai(bulletin_text, parish_name)
-
-                if not events:
-                    st.warning(f"No events found in {uploaded_pdf.name}.")
-                    continue
-
-                added_count = save_uploaded_events(parish_name, events)
-                total_added += added_count
-
-                st.success(f"Added {added_count} new events from {uploaded_pdf.name}.")
-
-                for event in events:
-                    st.markdown(
-                        f"- **{event.get('title', 'Untitled')}** — "
-                        f"{event.get('date_label', '')} {event.get('time', '')} "
-                        f"({event.get('category', 'Other')})"
-                    )
-
-            st.success(f"Done. Added {total_added} new events to the website.")
-            st.cache_data.clear()
-
-
-# ============================================================
-# FOOTER
-# ============================================================
-
-st.divider()
-
-st.markdown(
-    "<p style='text-align:center;color:#8a8a8a;'>Communio · Diocese of Palm Beach · Built with Streamlit</p>",
-    unsafe_allow_html=True,
-)
-
+            for
