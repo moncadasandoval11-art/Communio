@@ -1,42 +1,257 @@
-
-import json
-import hashlib
+import os
 import re
-from datetime import datetime, date
-from pathlib import Path
+import hashlib
+from datetime import datetime
 
 import pandas as pd
+import pdfplumber
 import streamlit as st
-
-try:
-    import pdfplumber
-except ImportError:
-    pdfplumber = None
 
 
 # ============================================================
-# APP CONFIG
+# BASIC SETUP
 # ============================================================
 
 st.set_page_config(
-    page_title="Communio | Diocese of Palm Beach",
-    page_icon="✦",
-    layout="wide",
+    page_title="Communio",
+    page_icon="⛪",
+    layout="wide"
 )
 
-DATA_FILE = Path("events_data.json")
-BULLETIN_FOLDER = Path("bulletins")
+BULLETIN_FOLDER = "bulletins"
 
-DIOCESE_HOME = "https://www.diocesepb.org/"
-DIOCESE_EVENTS = "https://www.diocesepb.org/news/events.html"
-BISHOP_MESSAGE = "https://www.diocesepb.org/about-us/office-of-the-bishop.html"
-ST_THOMAS_MORE_BULLETIN = "https://www.flipsnack.com/stmbb/st-thomas-more-catholic-church-april-2026-bulletin"
-BISHOP_IMAGE_FILE = "Headshot2-Chosen-FrRodriguez.jpg.webp"
-BISHOP_WELCOME = "Dear brothers and sisters in Christ, How beautiful is our Church! How beautiful it is to walk in the path of Christ Jesus in the company of so many beloved brothers and sisters! How beautiful is the Diocese of Palm Beach!"
 
+# ============================================================
+# BEACHY PALM BEACH CATHOLIC STYLE
+# ============================================================
+
+st.markdown("""
+<style>
+.stApp {
+    background: linear-gradient(135deg, #eaf8fb 0%, #fffdf7 55%, #d7f1f6 100%);
+}
+
+.main-title {
+    font-size: 3.3rem;
+    font-weight: 900;
+    color: #073b4c;
+    letter-spacing: 0.08em;
+}
+
+.subtitle {
+    color: #3f6473;
+    font-size: 1.1rem;
+    margin-bottom: 1.5rem;
+}
+
+.logo-box {
+    width: 84px;
+    height: 84px;
+    border-radius: 22px;
+    background: linear-gradient(135deg, #087e8b, #5ac8d8, #f5e6b8);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 2.3rem;
+    color: white;
+    font-weight: 800;
+    box-shadow: 0 10px 25px rgba(7, 59, 76, 0.22);
+}
+
+.hero-card {
+    background: rgba(255,255,255,0.82);
+    border: 1px solid rgba(8,126,139,0.18);
+    border-radius: 26px;
+    padding: 1.5rem;
+    box-shadow: 0 14px 35px rgba(7,59,76,0.10);
+}
+
+.quick-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 18px;
+    margin-top: 20px;
+}
+
+.quick-card {
+    background: linear-gradient(135deg, #073b4c, #087e8b);
+    padding: 20px;
+    border-radius: 18px;
+    color: white;
+    box-shadow: 0 12px 28px rgba(7,59,76,0.18);
+}
+
+.quick-card a {
+    color: white !important;
+    font-weight: 800;
+    font-size: 1.05rem;
+    text-decoration: none;
+}
+
+.quick-card p {
+    color: #e9fbff;
+    margin-top: 0.45rem;
+}
+
+.bishop-card {
+    display: flex;
+    gap: 22px;
+    align-items: center;
+    margin-top: 24px;
+    background: linear-gradient(135deg, #ffffff, #e6f8fb);
+    border: 1px solid rgba(8,126,139,0.18);
+    border-radius: 24px;
+    padding: 22px;
+    box-shadow: 0 12px 28px rgba(7,59,76,0.10);
+}
+
+.bishop-img {
+    width: 150px;
+    border-radius: 20px;
+    box-shadow: 0 10px 24px rgba(7,59,76,0.22);
+}
+
+.bishop-kicker {
+    color: #087e8b;
+    text-transform: uppercase;
+    font-size: 0.82rem;
+    font-weight: 900;
+    letter-spacing: 0.12em;
+}
+
+.bishop-quote {
+    color: #173f4c;
+    font-size: 1.05rem;
+    line-height: 1.55;
+    margin-top: 0.4rem;
+}
+
+.event-card {
+    background: rgba(255,255,255,0.94);
+    padding: 18px;
+    border-radius: 18px;
+    border-left: 6px solid #087e8b;
+    margin-bottom: 14px;
+    box-shadow: 0 8px 20px rgba(7,59,76,0.08);
+}
+
+.event-title {
+    color: #073b4c;
+    font-weight: 850;
+    font-size: 1.15rem;
+}
+
+.event-meta {
+    color: #4f6f7a;
+    font-size: 0.95rem;
+    margin-top: 0.2rem;
+}
+
+.badge {
+    display: inline-block;
+    background: #dff6f8;
+    color: #075763;
+    border: 1px solid #bfe9ee;
+    padding: 0.22rem 0.58rem;
+    border-radius: 999px;
+    font-size: 0.78rem;
+    margin-right: 0.3rem;
+    margin-top: 0.45rem;
+}
+
+.slide-box {
+    background: linear-gradient(135deg, #073b4c, #087e8b, #39b8c8);
+    color: white;
+    padding: 28px;
+    border-radius: 24px;
+    margin-top: 16px;
+    box-shadow: 0 14px 35px rgba(7,59,76,0.20);
+}
+
+.slide-title {
+    font-size: 1.55rem;
+    font-weight: 900;
+}
+
+.small-muted {
+    color: #5f7c86;
+}
+</style>
+""", unsafe_allow_html=True)
+
+
+# ============================================================
+# PARISH DIRECTORY
+# ============================================================
+
+PARISHES = [
+    {"parish": "Saint Sebastian", "city": "Sebastian", "deanery": "Northern Deanery"},
+    {"parish": "Our Lady of Guadalupe Mission", "city": "Fellsmere", "deanery": "Northern Deanery"},
+    {"parish": "Holy Cross", "city": "Vero Beach", "deanery": "Northern Deanery"},
+    {"parish": "Saint Helen", "city": "Vero Beach", "deanery": "Northern Deanery"},
+    {"parish": "Saint John of the Cross", "city": "Vero Beach", "deanery": "Northern Deanery"},
+    {"parish": "Notre Dame Catholic Mission", "city": "Fort Pierce", "deanery": "Northern Deanery"},
+    {"parish": "Saint Anastasia", "city": "Fort Pierce", "deanery": "Northern Deanery"},
+    {"parish": "San Juan Diego Hispanic Pastoral Center", "city": "Fort Pierce", "deanery": "Northern Deanery"},
+    {"parish": "Saint Mark the Evangelist", "city": "Fort Pierce", "deanery": "Northern Deanery"},
+    {"parish": "Holy Family", "city": "Port St. Lucie", "deanery": "Northern Deanery"},
+    {"parish": "Saint Lucie", "city": "Port St. Lucie", "deanery": "Northern Deanery"},
+    {"parish": "Saint Elizabeth Ann Seton", "city": "Port St. Lucie", "deanery": "Northern Deanery"},
+    {"parish": "Saint Bernadette", "city": "Port St. Lucie", "deanery": "Northern Deanery"},
+    {"parish": "Sacred Heart", "city": "Okeechobee", "deanery": "Northern Deanery"},
+
+    {"parish": "Saint Martin de Porres", "city": "Jensen Beach", "deanery": "Cathedral Deanery"},
+    {"parish": "Saint Joseph", "city": "Stuart", "deanery": "Cathedral Deanery"},
+    {"parish": "Holy Redeemer", "city": "Palm City", "deanery": "Cathedral Deanery"},
+    {"parish": "Saint Andrew", "city": "Stuart", "deanery": "Cathedral Deanery"},
+    {"parish": "Saint Christopher", "city": "Hobe Sound", "deanery": "Cathedral Deanery"},
+    {"parish": "Holy Cross", "city": "Indiantown", "deanery": "Cathedral Deanery"},
+    {"parish": "Saint Jude", "city": "Tequesta", "deanery": "Cathedral Deanery"},
+    {"parish": "Saint Peter", "city": "Jupiter", "deanery": "Cathedral Deanery"},
+    {"parish": "Saint Patrick", "city": "Palm Beach Gardens", "deanery": "Cathedral Deanery"},
+    {"parish": "Saint Paul of the Cross", "city": "North Palm Beach", "deanery": "Cathedral Deanery"},
+    {"parish": "Cathedral of Saint Ignatius Loyola", "city": "Palm Beach Gardens", "deanery": "Cathedral Deanery"},
+    {"parish": "Saint Clare", "city": "North Palm Beach", "deanery": "Cathedral Deanery"},
+    {"parish": "Saint Francis of Assisi", "city": "Riviera Beach", "deanery": "Cathedral Deanery"},
+    {"parish": "Saint John Fisher", "city": "West Palm Beach", "deanery": "Cathedral Deanery"},
+
+    {"parish": "Mary Immaculate", "city": "West Palm Beach", "deanery": "Central Deanery"},
+    {"parish": "Basilica of Saint Edward", "city": "Palm Beach", "deanery": "Central Deanery"},
+    {"parish": "Saint Ann", "city": "West Palm Beach", "deanery": "Central Deanery"},
+    {"parish": "Our Lady Queen of Apostles", "city": "Royal Palm Beach", "deanery": "Central Deanery"},
+    {"parish": "Saint Rita", "city": "Wellington", "deanery": "Central Deanery"},
+    {"parish": "Saint Therese de Lisieux", "city": "Wellington", "deanery": "Central Deanery"},
+    {"parish": "Saint Mary", "city": "Pahokee", "deanery": "Central Deanery"},
+    {"parish": "Saint Philip Benizi", "city": "Belle Glade", "deanery": "Central Deanery"},
+    {"parish": "Holy Name of Jesus", "city": "West Palm Beach", "deanery": "Central Deanery"},
+    {"parish": "Saint Juliana", "city": "West Palm Beach", "deanery": "Central Deanery"},
+    {"parish": "Saint Luke", "city": "Palm Springs", "deanery": "Central Deanery"},
+    {"parish": "Sacred Heart", "city": "Lake Worth", "deanery": "Central Deanery"},
+    {"parish": "Holy Spirit", "city": "Lantana", "deanery": "Central Deanery"},
+    {"parish": "Saint Matthew", "city": "Lantana", "deanery": "Central Deanery"},
+
+    {"parish": "Saint Mark", "city": "Boynton Beach", "deanery": "Southern Deanery"},
+    {"parish": "Saint Thomas More", "city": "Boynton Beach", "deanery": "Southern Deanery"},
+    {"parish": "Emmanuel", "city": "Delray Beach", "deanery": "Southern Deanery"},
+    {"parish": "Saint Vincent Ferrer", "city": "Delray Beach", "deanery": "Southern Deanery"},
+    {"parish": "Our Lady of Perpetual Help Mission", "city": "Delray Beach", "deanery": "Southern Deanery"},
+    {"parish": "Our Lady Queen of Peace", "city": "Delray Beach", "deanery": "Southern Deanery"},
+    {"parish": "Saint Lucy", "city": "Highland Beach", "deanery": "Southern Deanery"},
+    {"parish": "Ascension", "city": "Boca Raton", "deanery": "Southern Deanery"},
+    {"parish": "Saint Joan of Arc", "city": "Boca Raton", "deanery": "Southern Deanery"},
+    {"parish": "Saint Jude", "city": "Boca Raton", "deanery": "Southern Deanery"},
+    {"parish": "Our Lady of Lourdes", "city": "Boca Raton", "deanery": "Southern Deanery"},
+    {"parish": "Saint John the Evangelist", "city": "Boca Raton", "deanery": "Southern Deanery"},
+]
+
+parish_df = pd.DataFrame(PARISHES)
+
+
+# ============================================================
+# EVENT CATEGORIES
+# ============================================================
 
 CATEGORY_OPTIONS = [
-    "All",
     "Liturgy / Mass",
     "Confession / Prayer",
     "Adoration",
@@ -48,1171 +263,513 @@ CATEGORY_OPTIONS = [
     "Adult Formation",
     "Social / Fellowship",
     "Holiday / Holy Day",
-    "Sacraments",
-    "Diocesan",
+    "Ministry / Volunteer",
+    "Fundraiser",
+    "Other",
 ]
 
 
 # ============================================================
-# SEEDED PARISH DIRECTORY
+# HELPER FUNCTIONS
 # ============================================================
 
-PARISHES = [
-    # Northern Deanery
-    {"deanery":"Northern Deanery","parish":"Saint Sebastian","city":"Sebastian","address":"13075 US Highway 1, Sebastian, FL 32958","phone":"772-589-5790","email":"office@stsebastian.com"},
-    {"deanery":"Northern Deanery","parish":"Our Lady of Guadalupe Mission","city":"Fellsmere","address":"Fellsmere, FL","phone":"772-571-9875","email":"office@olgmission.com"},
-    {"deanery":"Northern Deanery","parish":"Holy Cross","city":"Vero Beach","address":"Vero Beach, FL","phone":"772-231-0671","email":"cflynn@holycrossverobeach.org"},
-    {"deanery":"Northern Deanery","parish":"Saint Helen","city":"Vero Beach","address":"Vero Beach, FL","phone":"772-567-5129","email":"church@sthelenvero.org"},
-    {"deanery":"Northern Deanery","parish":"Saint John of the Cross","city":"Vero Beach","address":"Vero Beach, FL","phone":"772-563-0057","email":"info@stjohnsvero.org"},
-    {"deanery":"Northern Deanery","parish":"Notre Dame Catholic Mission","city":"Fort Pierce","address":"Fort Pierce, FL","phone":"772-466-9617","email":"info@notredamecatholicmission.org"},
-    {"deanery":"Northern Deanery","parish":"Saint Anastasia","city":"Fort Pierce","address":"Fort Pierce, FL","phone":"772-461-2233","email":"frontdesk@stanastasiachurch.org"},
-    {"deanery":"Northern Deanery","parish":"San Juan Diego Hispanic Pastoral Center","city":"Fort Pierce","address":"Fort Pierce, FL","phone":"772-468-0806","email":"sanjuandiegohm129@outlook.com"},
-    {"deanery":"Northern Deanery","parish":"Saint Mark the Evangelist","city":"Fort Pierce","address":"Fort Pierce, FL","phone":"772-461-8150","email":"stmarks1924@gmail.com"},
-    {"deanery":"Northern Deanery","parish":"Holy Family","city":"Port St. Lucie","address":"Port St. Lucie, FL","phone":"772-335-2385","email":"office@holyfamilyccpsl.com"},
-    {"deanery":"Northern Deanery","parish":"Saint Lucie","city":"Port St. Lucie","address":"Port St. Lucie, FL","phone":"772-878-1215","email":"parishoffice@stlucie.cc"},
-    {"deanery":"Northern Deanery","parish":"Saint Elizabeth Ann Seton","city":"Port St. Lucie","address":"Port St. Lucie, FL","phone":"772-336-0282","email":"seton@steasparish.org"},
-    {"deanery":"Northern Deanery","parish":"Saint Bernadette","city":"Port St. Lucie","address":"Port St. Lucie, FL","phone":"772-336-9956","email":"parish@stbernadetteslw.org"},
-    {"deanery":"Northern Deanery","parish":"Sacred Heart","city":"Okeechobee","address":"Okeechobee, FL","phone":"863-763-3727","email":"sacredheart901@outlook.com"},
-
-    # Cathedral Deanery
-    {"deanery":"Cathedral Deanery","parish":"Saint Martin de Porres","city":"Jensen Beach","address":"Jensen Beach, FL","phone":"772-334-4214","email":"info@stmartindp.com"},
-    {"deanery":"Cathedral Deanery","parish":"Saint Joseph","city":"Stuart","address":"Stuart, FL","phone":"772-287-2727","email":"melanied@sjcflorida.org"},
-    {"deanery":"Cathedral Deanery","parish":"Holy Redeemer","city":"Palm City","address":"Palm City, FL","phone":"772-286-4590","email":"ewesley@holyredeemercc.org"},
-    {"deanery":"Cathedral Deanery","parish":"Saint Andrew","city":"Stuart","address":"Stuart, FL","phone":"772-781-4415","email":"admin@saintandrewcatholic.org"},
-    {"deanery":"Cathedral Deanery","parish":"Saint Christopher","city":"Hobe Sound","address":"Hobe Sound, FL","phone":"772-546-5150","email":"office@stchrishs.com"},
-    {"deanery":"Cathedral Deanery","parish":"Holy Cross","city":"Indiantown","address":"Indiantown, FL","phone":"772-597-2798","email":"holycross351@gmail.com"},
-    {"deanery":"Cathedral Deanery","parish":"Saint Jude","city":"Tequesta","address":"Tequesta, FL","phone":"561-746-7974","email":"info@stjudechurch.net"},
-    {"deanery":"Cathedral Deanery","parish":"Saint Peter","city":"Jupiter","address":"Jupiter, FL","phone":"561-575-0837","email":"office@stpeterjupiter.com"},
-    {"deanery":"Cathedral Deanery","parish":"Saint Patrick","city":"Palm Beach Gardens","address":"Palm Beach Gardens, FL","phone":"561-626-8626","email":"donna@stpatrickchurch.org"},
-    {"deanery":"Cathedral Deanery","parish":"Saint Paul of the Cross","city":"North Palm Beach","address":"North Palm Beach, FL","phone":"561-626-1873","email":"office@paulcross.org"},
-    {"deanery":"Cathedral Deanery","parish":"Cathedral of Saint Ignatius Loyola","city":"Palm Beach Gardens","address":"Palm Beach Gardens, FL","phone":"561-622-2565","email":"office@cathedralpb.com"},
-    {"deanery":"Cathedral Deanery","parish":"Saint Clare","city":"North Palm Beach","address":"North Palm Beach, FL","phone":"561-622-7477","email":"info@stclarechurch.net"},
-    {"deanery":"Cathedral Deanery","parish":"Saint Francis of Assisi","city":"Riviera Beach","address":"Riviera Beach, FL","phone":"561-842-2482","email":"stfrancisrbf@gmail.com"},
-    {"deanery":"Cathedral Deanery","parish":"Saint John Fisher","city":"West Palm Beach","address":"West Palm Beach, FL","phone":"561-842-1224","email":"sjf@stjohnfisherwpb.com"},
-
-    # Central Deanery
-    {"deanery":"Central Deanery","parish":"Mary Immaculate","city":"West Palm Beach","address":"West Palm Beach, FL","phone":"561-686-8128","email":"RVanoordt@miwpb.com"},
-    {"deanery":"Central Deanery","parish":"Basilica of Saint Edward","city":"Palm Beach","address":"144 North County Road, Palm Beach, FL 33480","phone":"561-832-0400","email":"stedwardch@aol.com"},
-    {"deanery":"Central Deanery","parish":"Saint Ann","city":"West Palm Beach","address":"West Palm Beach, FL","phone":"561-832-3757","email":""},
-    {"deanery":"Central Deanery","parish":"Our Lady Queen of Apostles","city":"Royal Palm Beach","address":"Royal Palm Beach, FL","phone":"561-798-5661","email":"info@olqa.cc"},
-    {"deanery":"Central Deanery","parish":"Saint Rita","city":"Wellington","address":"Wellington, FL","phone":"561-793-8544","email":"office@saintrita.com"},
-    {"deanery":"Central Deanery","parish":"Saint Therese de Lisieux","city":"Wellington","address":"Wellington, FL","phone":"561-784-0689","email":"frontoffice@sttherese-church.org"},
-    {"deanery":"Central Deanery","parish":"Saint Mary","city":"Pahokee","address":"Pahokee, FL","phone":"561-924-7305","email":"office@stmaryofpahokee.com"},
-    {"deanery":"Central Deanery","parish":"Saint Philip Benizi","city":"Belle Glade","address":"Belle Glade, FL","phone":"561-996-3870","email":"stphilipbenizicc21@gmail.com"},
-    {"deanery":"Central Deanery","parish":"Holy Name of Jesus","city":"West Palm Beach","address":"345 South Military Trail, West Palm Beach, FL 33415","phone":"561-683-3555","email":"bulletin@myhnj.org"},
-    {"deanery":"Central Deanery","parish":"Saint Juliana","city":"West Palm Beach","address":"West Palm Beach, FL","phone":"561-833-9745","email":"officeadmin@stjulianawpb.com"},
-    {"deanery":"Central Deanery","parish":"Saint Luke","city":"Palm Springs","address":"Palm Springs, FL","phone":"561-965-8980","email":"frandrew@stlukeparish.com"},
-    {"deanery":"Central Deanery","parish":"Sacred Heart","city":"Lake Worth","address":"Lake Worth, FL","phone":"561-582-4736","email":"rectory@sacredheartfamily.com"},
-    {"deanery":"Central Deanery","parish":"Holy Spirit","city":"Lantana","address":"Lantana, FL","phone":"561-585-5970","email":"office@holyspiritlantana.com"},
-    {"deanery":"Central Deanery","parish":"Saint Matthew","city":"Lantana","address":"Lantana, FL","phone":"561-966-8878","email":"frclemh@bellsouth.net"},
-
-    # Southern Deanery
-    {"deanery":"Southern Deanery","parish":"Saint Mark","city":"Boynton Beach","address":"Boynton Beach, FL","phone":"561-734-9330","email":"maskar@stmarkboynton.com"},
-    {"deanery":"Southern Deanery","parish":"Saint Thomas More","city":"Boynton Beach","address":"Boynton Beach, FL","phone":"561-737-3095","email":"operations@stmbb.org"},
-    {"deanery":"Southern Deanery","parish":"Emmanuel","city":"Delray Beach","address":"Delray Beach, FL","phone":"561-496-2480","email":"secretary@emmanuelcatholic.church"},
-    {"deanery":"Southern Deanery","parish":"Saint Vincent Ferrer","city":"Delray Beach","address":"Delray Beach, FL","phone":"561-276-6892","email":"office@stvincentferrer.com"},
-    {"deanery":"Southern Deanery","parish":"Our Lady of Perpetual Help Mission","city":"Delray Beach","address":"Delray Beach, FL","phone":"561-276-4880","email":"perpetualchurch@att.net"},
-    {"deanery":"Southern Deanery","parish":"Our Lady Queen of Peace","city":"Delray Beach","address":"Delray Beach, FL","phone":"561-499-6234","email":"queenofpeacedelray@gmail.com"},
-    {"deanery":"Southern Deanery","parish":"Saint Lucy","city":"Highland Beach","address":"Highland Beach, FL","phone":"561-278-1280","email":"stlucys@bellsouth.net"},
-    {"deanery":"Southern Deanery","parish":"Ascension","city":"Boca Raton","address":"Boca Raton, FL","phone":"561-997-5486","email":"ascension@accboca.net"},
-    {"deanery":"Southern Deanery","parish":"Saint Joan of Arc","city":"Boca Raton","address":"Boca Raton, FL","phone":"561-392-0007","email":"info_church@stjoan.org"},
-    {"deanery":"Southern Deanery","parish":"Saint Jude","city":"Boca Raton","address":"Boca Raton, FL","phone":"561-392-8172","email":"info@stjudeboca.org"},
-    {"deanery":"Southern Deanery","parish":"Our Lady of Lourdes","city":"Boca Raton","address":"Boca Raton, FL","phone":"561-483-2440","email":"secretary@lourdesboca.org"},
-    {"deanery":"Southern Deanery","parish":"Saint John the Evangelist","city":"Boca Raton","address":"Boca Raton, FL","phone":"561-488-1373","email":"office@stjohnevangelistbr.org"},
-]
-
-
-# ============================================================
-# SEEDED MANUAL EVENTS
-# These behave like events that were manually uploaded through the website.
-# ============================================================
-
-SEEDED_EVENTS = [
-    {
-        "title": "Final Guild Gathering and May Crowning",
-        "date_label": "Wednesday, May 6, 2026",
-        "time": "11:00 AM",
-        "location": "Basilica of Saint Edward",
-        "category": "Social / Fellowship",
-        "description": "Old-fashioned May procession, Crowning of the Blessed Mother, music, flowers, and spring luncheon in the parish hall.",
-        "parish": "Basilica of Saint Edward",
-        "source": "Manual bulletin upload — Basilica of Saint Edward, April 26, 2026",
-        "source_url": "",
-    },
-    {
-        "title": "Summer Mass Schedule Begins",
-        "date_label": "Monday, April 27, 2026",
-        "time": "8:00 AM daily Mass",
-        "location": "Basilica of Saint Edward",
-        "category": "Liturgy / Mass",
-        "description": "Daily Mass changes to 8:00 AM Monday through Saturday. Sunday schedule changes May 3 to 9:00 AM, 10:30 AM, and 12:00 Noon.",
-        "parish": "Basilica of Saint Edward",
-        "source": "Manual bulletin upload — Basilica of Saint Edward, April 26, 2026",
-        "source_url": "",
-    },
-    {
-        "title": "Rosary Group",
-        "date_label": "Monday through Saturday",
-        "time": "After 8:30 AM Mass",
-        "location": "Basilica of Saint Edward",
-        "category": "Confession / Prayer",
-        "description": "Parishioners are invited to pray the Rosary together after morning Mass.",
-        "parish": "Basilica of Saint Edward",
-        "source": "Manual bulletin upload — Basilica of Saint Edward, April 26, 2026",
-        "source_url": "",
-    },
-    {
-        "title": "World Youth Day Seoul 2027 Pilgrimage Registration",
-        "date_label": "Registration deadline: May 31, 2026",
-        "time": "",
-        "location": "Diocese of Palm Beach / Seoul, South Korea",
-        "category": "Youth / Young Adult",
-        "description": "Bishop Manuel de Jesús Rodríguez invites high school youth and young adults ages 16–39 to join the diocesan pilgrimage to World Youth Day, August 1–10, 2027.",
-        "parish": "Diocese of Palm Beach",
-        "source": "Manual bulletin upload",
-        "source_url": "",
-    },
-    {
-        "title": "Mid-Morning Bible Study",
-        "date_label": "Every Wednesday",
-        "time": "10:00 AM – 12:00 PM",
-        "location": "Holy Name of Jesus, School Room 3",
-        "category": "Adult Formation",
-        "description": "Weekly Catholic Bible study using videos, Scripture, and the Catechism of the Church.",
-        "parish": "Holy Name of Jesus",
-        "source": "Manual bulletin upload — Holy Name of Jesus, May 3, 2026",
-        "source_url": "",
-    },
-    {
-        "title": "Extraordinary Ministers of Holy Communion Workshop",
-        "date_label": "Saturday, May 23, 2026",
-        "time": "9:00 AM – 11:45 AM",
-        "location": "Holy Name of Jesus / Fatima Hall",
-        "category": "Adult Formation",
-        "description": "Workshop for existing Extraordinary Ministers of Holy Communion and anyone wishing to become a new Eucharistic Minister.",
-        "parish": "Holy Name of Jesus",
-        "source": "Manual bulletin upload — Holy Name of Jesus, May 3, 2026",
-        "source_url": "",
-    },
-    {
-        "title": "Unbound Revival Fire",
-        "date_label": "Sunday, May 24, 2026",
-        "time": "5:00 PM – 8:00 PM",
-        "location": "Holy Name of Jesus Catholic Church",
-        "category": "Adoration",
-        "description": "Holy Mass, praise and worship, Eucharistic adoration, and laying on of hands. Preaching by Fr. Antony Lopez.",
-        "parish": "Holy Name of Jesus",
-        "source": "Manual bulletin upload — Holy Name of Jesus, May 3, 2026",
-        "source_url": "",
-    },
-    {
-        "title": "Amor de Pareja: Diseño Divino",
-        "date_label": "Saturday, May 16, 2026",
-        "time": "6:00 PM – 9:00 PM",
-        "location": "Holy Name of Jesus / Trinity Center",
-        "category": "Marriage / Family",
-        "description": "Spanish-language couples conference. Registration listed at $20 per couple with refreshments.",
-        "parish": "Holy Name of Jesus",
-        "source": "Manual bulletin upload — Holy Name of Jesus, May 3, 2026",
-        "source_url": "",
-    },
-    {
-        "title": "Saint Thomas More April 2026 Bulletin",
-        "date_label": "April 2026",
-        "time": "",
-        "location": "Saint Thomas More, Boynton Beach",
-        "category": "Adult Formation",
-        "description": "Bulletin link stored for manual review/import. Events can be added below with the manual event form.",
-        "parish": "Saint Thomas More",
-        "source": "Manual bulletin link",
-        "source_url": ST_THOMAS_MORE_BULLETIN,
-    },
-]
-
-
-# ============================================================
-# STYLE
-# ============================================================
-
-st.markdown(
-    """
-<style>
-@import url('https://fonts.googleapis.com/css2?family=Cinzel:wght@500;700&family=Inter:wght@400;500;600;700;800&display=swap');
-
-html, body, [class*="css"] {
-    font-family: 'Inter', sans-serif;
-}
-
-.stApp {
-    background:
-        radial-gradient(circle at 15% 10%, rgba(212, 175, 55, 0.18), transparent 34%),
-        radial-gradient(circle at 90% 5%, rgba(90, 47, 156, 0.18), transparent 30%),
-        linear-gradient(135deg, #09090d 0%, #11131c 45%, #17111d 100%);
-    color: #f8f4ea;
-}
-
-.block-container {
-    padding-top: 1rem;
-    padding-bottom: 3rem;
-}
-
-.hero {
-    border: 1px solid rgba(245, 211, 122, 0.22);
-    background: linear-gradient(135deg, rgba(255,255,255,0.08), rgba(255,255,255,0.025));
-    box-shadow: 0 24px 80px rgba(0,0,0,0.35);
-    border-radius: 32px;
-    padding: 2.2rem;
-    margin-bottom: 1.1rem;
-}
-
-.logo-wrap {
-    display: flex;
-    align-items: center;
-    gap: 1rem;
-}
-
-.logo-mark {
-    width: 76px;
-    height: 76px;
-    border-radius: 24px;
-    background:
-        linear-gradient(135deg, #f7d77f, #af7e2e),
-        radial-gradient(circle at 60% 20%, white, transparent);
-    display: grid;
-    place-items: center;
-    box-shadow: 0 0 30px rgba(247,215,127,0.25);
-    color: #131018;
-    font-size: 2.5rem;
-    font-weight: 800;
-}
-
-.logo-title {
-    font-family: 'Cinzel', serif;
-    font-size: 3.2rem;
-    line-height: 1;
-    letter-spacing: 0.05em;
-    color: #f7d77f;
-    margin: 0;
-}
-
-.logo-subtitle {
-    margin-top: .25rem;
-    color: #d7c9ad;
-    font-size: 1.05rem;
-}
-
-.quick-grid {
-    display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-    gap: .8rem;
-    margin-top: 1.4rem;
-}
-
-.quick-card {
-    border: 1px solid rgba(247,215,127,.20);
-    background: rgba(255,255,255,.045);
-    padding: 1rem;
-    border-radius: 20px;
-}
-
-.quick-card a {
-    color: #f7d77f !important;
-    font-weight: 800;
-    text-decoration: none;
-}
-
-.quick-card p {
-    color: #cfc5b3;
-    margin-bottom: 0;
-    font-size: .92rem;
-}
-
-.event-card {
-    border: 1px solid rgba(247,215,127,.20);
-    background: rgba(255,255,255,.055);
-    border-radius: 24px;
-    padding: 1.1rem 1.2rem;
-    margin-bottom: 1rem;
-    box-shadow: 0 16px 45px rgba(0,0,0,.20);
-}
-
-.event-title {
-    font-size: 1.25rem;
-    font-weight: 800;
-    color: #fff9e8;
-    margin-bottom: .35rem;
-}
-
-.meta {
-    color: #d7c9ad;
-    font-size: .92rem;
-    margin-bottom: .25rem;
-}
-
-.pill {
-    display: inline-block;
-    padding: .25rem .55rem;
-    border-radius: 999px;
-    background: rgba(247,215,127,.14);
-    border: 1px solid rgba(247,215,127,.28);
-    color: #f7d77f;
-    margin-right: .35rem;
-    margin-top: .55rem;
-    font-size: .78rem;
-    font-weight: 700;
-}
-
-.parish-card {
-    border: 1px solid rgba(255,255,255,.10);
-    background: rgba(255,255,255,.045);
-    border-radius: 22px;
-    padding: 1rem;
-    margin-bottom: .8rem;
-}
-
-.parish-title {
-    font-weight: 800;
-    font-size: 1.1rem;
-    color: #fff9e8;
-}
-
-.small-muted {
-    color: #cfc5b3;
-    font-size: .9rem;
-}
-
-div[data-testid="stMetric"] {
-    background: rgba(255,255,255,.06);
-    border: 1px solid rgba(247,215,127,.18);
-    padding: 1rem;
-    border-radius: 20px;
-}
-
-@media (max-width: 900px) {
-    .quick-grid { grid-template-columns: 1fr; }
-    .logo-title { font-size: 2.4rem; }
-}
-</style>
-""",
-    unsafe_allow_html=True,
-)
-
-
-
-st.markdown(
-    """
-<style>
-@import url('https://fonts.googleapis.com/css2?family=Cinzel:wght@500;700&family=Inter:wght@400;500;600;700;800&display=swap');
-.stApp { background: radial-gradient(circle at 15% 5%, rgba(108,203,213,.32), transparent 28%), radial-gradient(circle at 85% 0%, rgba(244,223,184,.38), transparent 25%), linear-gradient(180deg, #dff7f8 0%, #eef8f3 34%, #fff8ec 100%) !important; color: #12313f; }
-.hero { border: 1px solid rgba(11,95,127,.16) !important; background: linear-gradient(135deg, rgba(255,255,255,.92), rgba(255,248,236,.78)) !important; box-shadow: 0 26px 70px rgba(7,56,79,.16) !important; border-radius: 34px; }
-.logo-mark { background: linear-gradient(160deg, #0b5f7f 0%, #58bdcb 58%, #f4dfb8 100%) !important; color: white !important; }
-.logo-title { color: #07384f !important; }
-.logo-subtitle, .small-muted, .meta, .quick-card p { color: #557080 !important; }
-.quick-card, .event-card, .parish-card, .bishop-card, .find-panel { border: 1px solid rgba(11,95,127,.13) !important; background: rgba(255,255,255,.78) !important; box-shadow: 0 13px 30px rgba(7,56,79,.08) !important; }
-.event-title, .parish-title { color: #07384f !important; }
-.quick-card a, .pill { color: #0b5f7f !important; }
-.pill { background: rgba(108,203,213,.18) !important; border-color: rgba(11,95,127,.16) !important; }
-.home-grid { display: grid; grid-template-columns: 1.05fr 1.15fr; gap: 1rem; margin-top: 1.25rem; }
-.bishop-card { display: grid; grid-template-columns: 120px 1fr; gap: 1rem; align-items: center; border-radius: 22px; padding: 1rem; background: linear-gradient(135deg, rgba(255,255,255,.88), rgba(244,223,184,.55)) !important; }
-.bishop-card img { width: 120px; height: 120px; object-fit: cover; border-radius: 26px; border: 4px solid white; box-shadow: 0 12px 30px rgba(7,56,79,.18); }
-.bishop-kicker { color: #0b5f7f; font-weight: 800; font-size: .8rem; letter-spacing: .08em; text-transform: uppercase; }
-.bishop-quote { color: #12313f; font-size: .98rem; line-height: 1.45; margin-top: .25rem; }
-.slideshow-card { min-height: 188px; position: relative; overflow: hidden; border-radius: 22px; padding: 1rem; margin-top:.75rem; background: linear-gradient(135deg, rgba(11,95,127,.95), rgba(71,180,196,.86)); color: white; }
-.slide { position: absolute; inset: 1rem; opacity: 0; transform: translateX(20px); animation: eventSlide 24s infinite; }
-.slide:nth-child(1) { animation-delay: 0s; } .slide:nth-child(2) { animation-delay: 6s; } .slide:nth-child(3) { animation-delay: 12s; } .slide:nth-child(4) { animation-delay: 18s; }
-@keyframes eventSlide { 0% { opacity: 0; transform: translateX(20px); } 6% { opacity: 1; transform: translateX(0); } 22% { opacity: 1; transform: translateX(0); } 28% { opacity: 0; transform: translateX(-20px); } 100% { opacity: 0; transform: translateX(-20px); } }
-.slide-kicker { color: #f4dfb8; font-size: .78rem; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
-.slide-title { font-size: 1.35rem; font-weight: 800; margin: .3rem 0; }
-.slide-meta { color: rgba(255,255,255,.88); font-size: .95rem; }
-.find-panel { border-radius: 28px; padding: 1.15rem 1.25rem; margin: 1rem 0 1.2rem 0; }
-.panel-title { font-family: 'Cinzel', serif; color: #07384f; font-size: 1.45rem; font-weight: 700; margin-bottom: .2rem; }
-.panel-subtitle { color: #557080; margin-bottom: .8rem; }
-@media (max-width: 950px) { .home-grid { grid-template-columns: 1fr; } .bishop-card { grid-template-columns: 1fr; } }
-</style>
-""",
-    unsafe_allow_html=True,
-)
-
-# ============================================================
-# HELPERS
-# ============================================================
-
-def event_id(event: dict) -> str:
-    base = f"{event.get('parish','')}-{event.get('title','')}-{event.get('date_label','')}-{event.get('time','')}"
-    return hashlib.md5(base.encode("utf-8")).hexdigest()
-
-
-def add_ids(events: list[dict]) -> list[dict]:
-    out = []
-    for e in events:
-        copy = dict(e)
-        copy.setdefault("id", event_id(copy))
-        copy.setdefault("date_added", "seeded")
-        out.append(copy)
-    return out
-
-
-def make_home_slides(events: list[dict]) -> str:
-    if not events:
+def clean_text(text):
+    if text is None:
         return ""
-    slides = []
-    for event in events[:4]:
-        slides.append(f"""
-        <div class="slide">
-            <div class="slide-kicker">Featured parish event</div>
-            <div class="slide-title">{event.get('title', '')}</div>
-            <div class="slide-meta">🗓️ {event.get('date_label', 'Date not listed')} {(' · ' + event.get('time', '')) if event.get('time') else ''}</div>
-            <div class="slide-meta">📍 {event.get('location') or event.get('parish') or 'Location not listed'}</div>
-        </div>
-        """)
-    return "\n".join(slides)
+    return re.sub(r"\s+", " ", str(text)).strip()
 
 
-def bishop_image_src() -> str:
-    import base64
-    image_path = Path(__file__).with_name(BISHOP_IMAGE_FILE)
-    if image_path.exists():
-        return "data:image/webp;base64," + base64.b64encode(image_path.read_bytes()).decode("utf-8")
-    return ""
+def normalize(text):
+    text = clean_text(text).lower()
+    text = text.replace("saint", "st")
+    text = text.replace(".", "")
+    text = re.sub(r"[^a-z0-9 ]", " ", text)
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
 
 
-def load_manual_events() -> list[dict]:
-    if not DATA_FILE.exists():
-        return []
-    try:
-        data = json.loads(DATA_FILE.read_text())
-        if isinstance(data, list):
-            return data
-        if isinstance(data, dict):
-            events = []
-            for parish_data in data.values():
-                if isinstance(parish_data, dict):
-                    events.extend(parish_data.get("events", []))
-                elif isinstance(parish_data, list):
-                    events.extend(parish_data)
-            return events
-    except Exception:
-        return []
-    return []
+def infer_parish_from_filename(filename):
+    name = normalize(filename)
 
-
-def save_manual_event(event: dict) -> None:
-    events = load_manual_events()
-    event["id"] = event_id(event)
-    event["date_added"] = datetime.now().isoformat()
-
-    existing_ids = {e.get("id") for e in events}
-    if event["id"] not in existing_ids:
-        events.append(event)
-
-    DATA_FILE.write_text(json.dumps(events, indent=2))
-
-
-def save_many_events(events_to_save: list[dict]) -> int:
-    events = load_manual_events()
-    existing_ids = {e.get("id") for e in events}
-    count = 0
-
-    for event in events_to_save:
-        event["id"] = event_id(event)
-        event["date_added"] = datetime.now().isoformat()
-        if event["id"] not in existing_ids:
-            events.append(event)
-            existing_ids.add(event["id"])
-            count += 1
-
-    DATA_FILE.write_text(json.dumps(events, indent=2))
-    return count
-
-
-def clean_text(value: str) -> str:
-    return re.sub(r"\s+", " ", str(value or "")).strip()
-
-
-def normalize_text(value: str) -> str:
-    value = clean_text(value).lower()
-    value = value.replace("saint", "st")
-    value = value.replace(".", "")
-    value = re.sub(r"[^a-z0-9 ]", " ", value)
-    return re.sub(r"\s+", " ", value).strip()
-
-
-def extract_text_from_pdf(uploaded_file) -> str:
-    if pdfplumber is None:
-        st.error("pdfplumber is missing. Add pdfplumber to requirements.txt.")
-        return ""
-
-    text = ""
-    try:
-        with pdfplumber.open(uploaded_file) as pdf:
-            for page in pdf.pages:
-                page_text = page.extract_text() or ""
-                text += page_text + "\n"
-    except Exception as e:
-        st.error(f"Could not read PDF: {e}")
-
-    return text
-
-
-def extract_text_from_pdf_path(pdf_path: Path) -> str:
-    if pdfplumber is None:
-        return ""
-
-    text = ""
-    try:
-        with pdfplumber.open(str(pdf_path)) as pdf:
-            for page in pdf.pages:
-                page_text = page.extract_text() or ""
-                text += page_text + "\n"
-    except Exception:
-        return ""
-
-    return text
-
-
-def infer_parish_from_filename(filename: str) -> str:
-    """Guess the parish from the PDF filename so GitHub uploads automatically attach to the right parish."""
-    filename_norm = normalize_text(Path(filename).stem)
-
-    best_parish = "Unknown Parish"
+    best_match = ""
     best_score = 0
 
-    for parish in [p["parish"] for p in PARISHES]:
-        parish_norm = normalize_text(parish)
-        words = [w for w in parish_norm.split() if len(w) > 1 and w not in {"of", "the", "and"}]
-        score = sum(1 for word in words if word in filename_norm)
-
-        # Bonus for very distinctive names.
-        if parish_norm in filename_norm:
-            score += 5
+    for parish in parish_df["parish"]:
+        parish_norm = normalize(parish)
+        words = parish_norm.split()
+        score = sum(1 for word in words if word in name)
 
         if score > best_score:
             best_score = score
-            best_parish = parish
+            best_match = parish
 
-    return best_parish if best_score >= 1 else "Unknown Parish"
+    if best_score >= 2:
+        return best_match
 
-
-def canonical_time(value: str) -> str:
-    value = clean_text(value)
-    value = value.replace(".", "")
-    value = re.sub(r"\s+", " ", value)
-
-    noon_match = re.match(r"^(\d{1,2})\s*noon$", value, flags=re.I)
-    if noon_match:
-        hour = int(noon_match.group(1))
-        return f"{hour}:00 PM" if hour == 12 else f"{hour}:00 Noon"
-
-    match = re.match(r"^(\d{1,2})(?::(\d{2}))?\s*(am|pm)$", value, flags=re.I)
-    if match:
-        hour = int(match.group(1))
-        minute = match.group(2) or "00"
-        suffix = match.group(3).upper()
-        return f"{hour}:{minute} {suffix}"
-
-    return value
+    return "Unknown Parish"
 
 
-def extract_times(segment: str) -> list[str]:
-    """Extract normal bulletin times, including compact text like 12Noon or 8:00AM."""
-    segment = segment.replace("—", "-").replace("–", "-")
-    patterns = [
-        r"\b\d{1,2}:\d{2}\s*(?:am|pm|AM|PM)\b",
-        r"\b\d{1,2}\s*(?:am|pm|AM|PM)\b",
-        r"\b\d{1,2}\s*(?:noon|Noon|NOON)\b",
-    ]
+def infer_category(title, description=""):
+    text = normalize(title + " " + description)
 
-    found = []
-    for pattern in patterns:
-        for match in re.findall(pattern, segment):
-            time_value = canonical_time(match)
-            if time_value not in found:
-                found.append(time_value)
-
-    return found
-
-
-def infer_category(title: str, description: str = "") -> str:
-    t = f"{title} {description}".lower()
-    if any(x in t for x in ["mass", "misa", "eucharist", "holy communion", "first communion", "liturgy", "vigil"]):
+    if any(w in text for w in ["mass", "eucharist", "first communion", "communion", "vigil", "liturgy"]):
         return "Liturgy / Mass"
-    if "adoration" in t or "blessed sacrament" in t:
-        return "Adoration"
-    if any(x in t for x in ["confession", "reconciliation", "penance", "baptism", "confirmation", "sacrament"]):
-        return "Sacraments"
-    if any(x in t for x in ["rosary", "novena", "prayer", "divine mercy"]):
+
+    if any(w in text for w in ["confession", "rosary", "novena", "prayer", "stations", "divine mercy"]):
         return "Confession / Prayer"
-    if "retreat" in t:
+
+    if "adoration" in text or "blessed sacrament" in text:
+        return "Adoration"
+
+    if "retreat" in text:
         return "Retreat"
-    if any(x in t for x in ["youth", "young adult", "world youth day"]):
+
+    if any(w in text for w in ["youth", "young adult", "world youth day", "teen"]):
         return "Youth / Young Adult"
-    if any(x in t for x in ["marriage", "couple", "pareja", "family"]):
+
+    if any(w in text for w in ["marriage", "couple", "pareja", "family", "families", "matrimonial"]):
         return "Marriage / Family"
-    if any(x in t for x in ["school", "open house"]):
+
+    if any(w in text for w in ["school", "academy", "open house"]):
         return "School / Open House"
-    if any(x in t for x in ["pantry", "donation", "charity", "outreach", "service", "food"]):
+
+    if any(w in text for w in ["pantry", "food", "charity", "donation", "outreach", "homeless", "drive", "service"]):
         return "Service / Charity"
-    if any(x in t for x in ["bible", "formation", "study", "workshop", "catechism", "oica", "rcia"]):
+
+    if any(w in text for w in ["bible study", "faith formation", "study", "formation", "catechism", "oica", "rcia", "speaker", "workshop"]):
         return "Adult Formation"
-    if any(x in t for x in ["luncheon", "guild", "social", "fellowship", "festival"]):
+
+    if any(w in text for w in ["social", "fellowship", "luncheon", "gathering", "festival", "guild", "coffee"]):
         return "Social / Fellowship"
-    if any(x in t for x in ["easter", "christmas", "advent", "lent", "holy day", "pentecost"]):
+
+    if any(w in text for w in ["easter", "christmas", "advent", "lent", "holy day", "pentecost"]):
         return "Holiday / Holy Day"
-    return "Adult Formation"
+
+    if any(w in text for w in ["minister", "volunteer", "lector", "usher", "ministry"]):
+        return "Ministry / Volunteer"
+
+    if any(w in text for w in ["fundraiser", "sale", "raffle", "treasures"]):
+        return "Fundraiser"
+
+    return "Other"
 
 
-def build_event(title: str, date_label: str, time: str, parish: str, category: str, description: str, source_name: str, location: str = "") -> dict:
-    event = {
-        "title": clean_text(title),
-        "date_label": clean_text(date_label),
-        "time": clean_text(time),
-        "location": clean_text(location) or parish,
-        "category": category,
-        "description": clean_text(description),
-        "parish": parish,
-        "source": f"Automatic PDF import — {source_name}",
-        "source_url": "",
-    }
-    event["id"] = event_id(event)
-    return event
+def extract_text_from_pdf(pdf_path):
+    text = ""
+
+    try:
+        with pdfplumber.open(pdf_path) as pdf:
+            for page in pdf.pages:
+                page_text = page.extract_text()
+                if page_text:
+                    text += "\n" + page_text
+    except Exception as e:
+        st.warning(f"Could not read {pdf_path}: {e}")
+
+    return text
 
 
-def extract_sacrament_schedule_events(text: str, parish: str, source_name: str) -> list[dict]:
-    """
-    Extract recurring sacramental schedules from bulletins.
-    Focuses on Mass, Confession/Reconciliation, Adoration, Baptism, Confirmation,
-    First Communion, and First Penance. This is intentionally rule-based so no API key is needed.
-    """
-    raw_lines = [clean_text(line) for line in text.splitlines() if clean_text(line)]
-    events = []
-
-    # Combine nearby lines because bulletin schedules often split label and time across separate lines.
-    windows = []
-    for i, line in enumerate(raw_lines):
-        context = " ".join(raw_lines[i:i + 5])
-        windows.append((line, context))
-
-    for line, context in windows:
-        line_l = line.lower()
-        context_l = context.lower()
-        compact = re.sub(r"\s+", "", context_l)
-        times = extract_times(context)
-
-        # Sunday Mass schedules, including compact text such as SundayMasses:7:00AM,9:00AM,10:30AM&12Noon.
-        if ("sunday" in context_l and "mass" in context_l) or "sundaymasses" in compact:
-            for time_value in times:
-                events.append(build_event(
-                    "Sunday Mass",
-                    "Sunday",
-                    time_value,
-                    parish,
-                    "Liturgy / Mass",
-                    "Recurring Sunday Mass schedule extracted from the parish bulletin.",
-                    source_name,
-                ))
-
-        # Saturday Vigil Mass.
-        if ("vigil" in context_l and "mass" in context_l) or "vigilmass" in compact or "saturdayeveningvigilmass" in compact:
-            for time_value in times:
-                events.append(build_event(
-                    "Saturday Vigil Mass",
-                    "Saturday",
-                    time_value,
-                    parish,
-                    "Liturgy / Mass",
-                    "Recurring Saturday evening Vigil Mass schedule extracted from the parish bulletin.",
-                    source_name,
-                ))
-
-        # Daily / weekday Mass schedules.
-        if any(key in context_l for key in ["daily mass", "weekday mass", "monday through friday", "mon - fri", "mon-fri"]):
-            for time_value in times:
-                events.append(build_event(
-                    "Daily Mass",
-                    "Monday through Friday",
-                    time_value,
-                    parish,
-                    "Liturgy / Mass",
-                    "Recurring weekday Mass schedule extracted from the parish bulletin.",
-                    source_name,
-                ))
-
-        # Saturday daily Mass separate from Vigil.
-        if (("saturdays" in context_l or line_l.startswith("saturday")) and "vigil" not in context_l and "confession" not in context_l and "mass" in context_l):
-            for time_value in times:
-                events.append(build_event(
-                    "Saturday Morning Mass",
-                    "Saturday",
-                    time_value,
-                    parish,
-                    "Liturgy / Mass",
-                    "Recurring Saturday morning Mass schedule extracted from the parish bulletin.",
-                    source_name,
-                ))
-
-        # Confession / Reconciliation.
-        if any(key in context_l for key in ["confession", "confessions", "reconciliation", "sacrament of penance"]):
-            for time_value in times:
-                events.append(build_event(
-                    "Confession",
-                    "Weekly",
-                    time_value,
-                    parish,
-                    "Sacraments",
-                    "Confession/Reconciliation schedule extracted from the parish bulletin.",
-                    source_name,
-                ))
-
-        # Eucharistic Adoration.
-        if "adoration" in context_l or "blessed sacrament" in context_l:
-            if times:
-                time_label = " – ".join(times[:2]) if len(times) >= 2 else times[0]
-            else:
-                time_label = "See bulletin"
-            date_label = "Monday through Friday" if "monday" in context_l and "friday" in context_l else "See bulletin"
-            events.append(build_event(
-                "Eucharistic Adoration",
-                date_label,
-                time_label,
-                parish,
-                "Adoration",
-                "Adoration schedule extracted from the parish bulletin.",
-                source_name,
-            ))
-
-        # Baptism, Confirmation, First Communion / First Eucharist, First Penance.
-        sacrament_terms = [
-            ("Baptism", ["baptism", "baptismal"]),
-            ("Confirmation", ["confirmation"]),
-            ("First Communion", ["first communion", "first eucharist"]),
-            ("First Penance", ["first penance"]),
-        ]
-        for title, terms in sacrament_terms:
-            if any(term in context_l for term in terms):
-                time_label = times[0] if times else "Contact parish / see bulletin"
-                events.append(build_event(
-                    title,
-                    "See bulletin",
-                    time_label,
-                    parish,
-                    "Sacraments",
-                    f"{title} information extracted from the parish bulletin.",
-                    source_name,
-                ))
-
-    return list({e["id"]: e for e in events}.values())
-
-
-def extract_mass_intention_events(text: str, parish: str, source_name: str) -> list[dict]:
-    """
-    Extract dated Masses from Mass Intention sections, so users can find the actual
-    Mass times printed in each uploaded bulletin.
-    """
-    lines = [clean_text(line) for line in text.splitlines() if clean_text(line)]
-    events = []
-    in_mass_section = False
-    current_day = ""
-
-    day_date_pattern = re.compile(
-        r"\b(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday),?\s+[A-Za-z]+\s+\d{1,2}(?:st|nd|rd|th)?(?:,?\s+\d{4})?\b",
-        flags=re.I,
-    )
-    loose_day_pattern = re.compile(
-        r"\b(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)\s+[A-Za-z]+\s+\d{1,2}(?:st|nd|rd|th)?\b",
-        flags=re.I,
-    )
-
-    for line in lines:
-        lower = line.lower()
-        if "mass intentions" in lower or "for the week prayer" in lower or "prayer & worship" in lower:
-            in_mass_section = True
-            continue
-
-        if in_mass_section and any(stop in lower for stop in ["scripture readings", "view this bulletin", "gospel meditation", "welcome/events"]):
-            # Stop only if there are no times on this line.
-            if not extract_times(line):
-                in_mass_section = False
-
-        day_match = day_date_pattern.search(line) or loose_day_pattern.search(line)
-        if day_match:
-            current_day = clean_text(day_match.group(0))
-
-        if not in_mass_section and not current_day:
-            continue
-
-        times = extract_times(line)
-        if not times:
-            continue
-
-        # Avoid pulling times from non-Mass sections unless clearly in a Mass/prayer schedule.
-        if not in_mass_section and "mass" not in lower and "misa" not in lower:
-            continue
-
-        for time_value in times:
-            title = "Mass"
-            if "spanish" in lower or "español" in lower or "sabado" in lower:
-                title = "Spanish Mass"
-            elif "bilingual" in lower:
-                title = "Bilingual Mass"
-            elif "vigil" in lower:
-                title = "Saturday Vigil Mass"
-            elif current_day.lower().startswith("sunday"):
-                title = "Sunday Mass"
-            elif current_day:
-                title = "Daily Mass"
-
-            events.append(build_event(
-                title,
-                current_day or "See bulletin",
-                time_value,
-                parish,
-                "Liturgy / Mass",
-                "Dated Mass time extracted from the Mass intentions / worship schedule in the bulletin.",
-                source_name,
-            ))
-
-    return list({e["id"]: e for e in events}.values())
-
-
-def keyword_extract_events(text: str, parish: str, source_name: str) -> list[dict]:
-    """
-    No-API extractor used for both GitHub PDF folder scanning and manual PDF upload.
-    It prioritizes Mass and sacrament schedules, then falls back to common event keywords.
-    """
-    events = []
-    events.extend(extract_sacrament_schedule_events(text, parish, source_name))
-    events.extend(extract_mass_intention_events(text, parish, source_name))
-
-    lines = [clean_text(line) for line in text.splitlines() if clean_text(line)]
-    keywords = [
-        "workshop", "bible study", "adoration", "retreat", "conference", "conferencia",
-        "rosary", "novena", "youth day", "guild", "meeting", "reun", "charismatic",
-        "revival", "minister", "ministry", "carmelite", "columbiettes", "knights of columbus",
-        "legion of mary", "luncheon", "may crowning", "food pantry", "outreach"
+def find_date_near_line(line, context):
+    date_patterns = [
+        r"(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday),?\s+[A-Z][a-z]+\s+\d{1,2},?\s+\d{4}",
+        r"(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)\s+[A-Z][a-z]+\s+\d{1,2}",
+        r"[A-Z][a-z]+\s+\d{1,2},?\s+\d{4}",
+        r"[A-Z][a-z]+\s+\d{1,2}(st|nd|rd|th)?",
+        r"\d{1,2}/\d{1,2}/\d{2,4}",
     ]
 
-    for i, line in enumerate(lines):
-        lower = line.lower()
-        if not any(k in lower for k in keywords):
-            continue
+    combined = line + " " + context
 
-        context = " ".join(lines[max(0, i - 1):i + 5])
-        title = line[:90]
-        time_values = extract_times(context)
-        event = {
-            "title": title,
-            "date_label": "See bulletin",
-            "time": time_values[0] if time_values else "",
-            "location": parish,
-            "category": infer_category(title, context),
-            "description": context[:350],
-            "parish": parish,
-            "source": f"Automatic PDF import — {source_name}",
-            "source_url": "",
-        }
-        event["id"] = event_id(event)
-        events.append(event)
+    for pattern in date_patterns:
+        match = re.search(pattern, combined)
+        if match:
+            return clean_text(match.group(0))
 
-    return list({e["id"]: e for e in events}.values())
+    return ""
 
 
-@st.cache_data(show_spinner=False)
-def load_bulletin_folder_events() -> list[dict]:
-    """Automatically read every PDF inside the GitHub bulletins/ folder."""
-    if not BULLETIN_FOLDER.exists():
-        return []
+def find_time_near_line(line, context):
+    time_patterns = [
+        r"\d{1,2}:\d{2}\s*(am|pm|AM|PM)\s*[-–]\s*\d{1,2}:\d{2}\s*(am|pm|AM|PM)",
+        r"\d{1,2}\s*(am|pm|AM|PM)\s*[-–]\s*\d{1,2}\s*(am|pm|AM|PM)",
+        r"\d{1,2}:\d{2}\s*(am|pm|AM|PM)",
+        r"\d{1,2}\s*(am|pm|AM|PM)",
+    ]
 
-    events = []
-    for pdf_path in sorted(BULLETIN_FOLDER.glob("*.pdf")):
-        parish = infer_parish_from_filename(pdf_path.name)
-        text = extract_text_from_pdf_path(pdf_path)
-        if not text:
-            continue
-        found = keyword_extract_events(text, parish, pdf_path.name)
-        events.extend(found)
+    combined = line + " " + context
 
-    return list({e["id"]: e for e in events}.values())
+    for pattern in time_patterns:
+        match = re.search(pattern, combined)
+        if match:
+            return clean_text(match.group(0))
 
-def matches(row: pd.Series, query: str) -> bool:
-    if not query:
-        return True
-    haystack = " ".join(str(v) for v in row.fillna("").values).lower()
-    return query.lower() in haystack
+    return ""
 
 
-def render_event(event: pd.Series) -> None:
-    title = event.get("title", "")
-    date_label = event.get("date_label", "")
-    time = event.get("time", "")
-    location = event.get("location", "")
-    description = event.get("description", "")
-    parish = event.get("parish", "")
-    category = event.get("category", "")
-    source = event.get("source", "")
-    source_url = event.get("source_url", "")
+def looks_like_event_line(line):
+    text = normalize(line)
 
-    source_html = f'<a href="{source_url}" target="_blank">{source}</a>' if source_url else source
+    event_keywords = [
+        "workshop", "gathering", "study", "bible", "rosary", "novena",
+        "adoration", "revival", "retreat", "youth", "world youth day",
+        "luncheon", "meeting", "guild", "ministry", "volunteer",
+        "first communion", "confirmation", "mass", "confession",
+        "prayer", "festival", "fundraiser", "sale", "speaker",
+        "formation", "oica", "rcia", "carmelite", "knights of columbus",
+        "columbiettes", "legion of mary", "parents", "pareja",
+        "marriage", "food pantry", "outreach"
+    ]
 
-    st.markdown(
-        f"""
-<div class="event-card">
-    <div class="event-title">{title}</div>
-    <div class="meta">🗓️ {date_label or "Date not listed"} {(" · " + time) if time else ""}</div>
-    <div class="meta">📍 {location or parish or "Location not listed"}</div>
-    <div class="small-muted">{description}</div>
-    <span class="pill">{category}</span>
-    <span class="pill">{parish}</span>
-    <span class="pill">{source_html}</span>
-</div>
-""",
-        unsafe_allow_html=True,
-    )
-
-
-def render_parish(row: pd.Series) -> None:
-    email = row.get("email", "")
-    email_html = f'<a href="mailto:{email}">{email}</a>' if email else "No email listed"
-
-    st.markdown(
-        f"""
-<div class="parish-card">
-    <div class="parish-title">{row.get("parish","")}</div>
-    <div class="small-muted">{row.get("deanery","")} · {row.get("city","")}</div>
-    <div class="small-muted">📍 {row.get("address","")}</div>
-    <div class="small-muted">☎️ {row.get("phone","")} · ✉️ {email_html}</div>
-</div>
-""",
-        unsafe_allow_html=True,
-    )
-
-
-# ============================================================
-# LOAD DATA
-# ============================================================
-
-parishes_df = pd.DataFrame(PARISHES)
-
-seeded_events = add_ids(SEEDED_EVENTS)
-saved_events = load_manual_events()
-bulletin_folder_events = load_bulletin_folder_events()
-events_df = pd.DataFrame(seeded_events + saved_events + bulletin_folder_events)
-
-if not events_df.empty:
-    events_df = events_df.drop_duplicates(subset=["id"], keep="first")
-else:
-    events_df = pd.DataFrame(columns=[
-        "id", "title", "date_label", "time", "location", "category",
-        "description", "parish", "source", "source_url", "date_added"
+    has_keyword = any(keyword in text for keyword in event_keywords)
+    has_time = bool(re.search(r"\d{1,2}(:\d{2})?\s*(am|pm)", text))
+    has_date_word = any(day in text for day in [
+        "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday",
+        "may", "june", "july", "august", "september", "october", "november", "december",
+        "january", "february", "march", "april"
     ])
 
+    if has_keyword and (has_time or has_date_word):
+        return True
+
+    if has_keyword and len(line) < 140:
+        return True
+
+    return False
+
+
+def make_event_id(parish, title, date_label, time_label):
+    raw = f"{parish}-{title}-{date_label}-{time_label}"
+    return hashlib.md5(raw.encode()).hexdigest()
+
+
+def extract_events_from_text(text, parish, source_file):
+    lines = [clean_text(line) for line in text.splitlines() if clean_text(line)]
+
+    events = []
+
+    for i, line in enumerate(lines):
+        if not looks_like_event_line(line):
+            continue
+
+        previous_line = lines[i - 1] if i > 0 else ""
+        next_line = lines[i + 1] if i + 1 < len(lines) else ""
+        second_next_line = lines[i + 2] if i + 2 < len(lines) else ""
+
+        context = " ".join([previous_line, next_line, second_next_line])
+
+        title = line
+
+        if len(title) > 110:
+            title = title[:110] + "..."
+
+        date_label = find_date_near_line(line, context)
+        time_label = find_time_near_line(line, context)
+
+        description = clean_text(" ".join([line, next_line, second_next_line]))
+        category = infer_category(title, description)
+
+        event = {
+            "id": make_event_id(parish, title, date_label, time_label),
+            "title": title,
+            "date_label": date_label if date_label else "See bulletin",
+            "time": time_label if time_label else "See bulletin",
+            "parish": parish,
+            "category": category,
+            "description": description,
+            "source_file": source_file,
+        }
+
+        events.append(event)
+
+    unique = {}
+    for event in events:
+        unique[event["id"]] = event
+
+    return list(unique.values())
+
+
+@st.cache_data(show_spinner=True)
+def load_events_from_bulletins():
+    all_events = []
+
+    if not os.path.exists(BULLETIN_FOLDER):
+        os.makedirs(BULLETIN_FOLDER, exist_ok=True)
+        return pd.DataFrame(columns=[
+            "id", "title", "date_label", "time", "parish",
+            "category", "description", "source_file"
+        ])
+
+    pdf_files = [
+        file for file in os.listdir(BULLETIN_FOLDER)
+        if file.lower().endswith(".pdf")
+    ]
+
+    for file in pdf_files:
+        pdf_path = os.path.join(BULLETIN_FOLDER, file)
+        parish = infer_parish_from_filename(file)
+        text = extract_text_from_pdf(pdf_path)
+        events = extract_events_from_text(text, parish, file)
+        all_events.extend(events)
+
+    if not all_events:
+        return pd.DataFrame(columns=[
+            "id", "title", "date_label", "time", "parish",
+            "category", "description", "source_file"
+        ])
+
+    return pd.DataFrame(all_events)
+
 
 # ============================================================
-# HERO
+# OPTIONAL SEED EVENTS
+# These make the app look populated even before you upload PDFs.
+# You can delete these later if you want.
 # ============================================================
 
-home_slides_html = make_home_slides(seeded_events)
-bishop_src = bishop_image_src()
+seed_events = pd.DataFrame([
+    {
+        "id": "seed-1",
+        "title": "Final Guild Gathering and May Crowning",
+        "date_label": "May 6, 2026",
+        "time": "11:00 AM",
+        "parish": "Basilica of Saint Edward",
+        "category": "Social / Fellowship",
+        "description": "Final Guild gathering with May procession, Crowning of the Blessed Mother, music, and luncheon.",
+        "source_file": "Seeded from bulletin",
+    },
+    {
+        "id": "seed-2",
+        "title": "Extraordinary Ministers of Holy Communion Workshop",
+        "date_label": "May 23, 2026",
+        "time": "9:00 AM - 11:45 AM",
+        "parish": "Holy Name of Jesus",
+        "category": "Ministry / Volunteer",
+        "description": "Workshop for existing Eucharistic Ministers and anyone wishing to become a new Eucharistic Minister.",
+        "source_file": "Seeded from bulletin",
+    },
+    {
+        "id": "seed-3",
+        "title": "Unbound Revival Fire",
+        "date_label": "May 24, 2026",
+        "time": "5:00 PM - 8:00 PM",
+        "parish": "Holy Name of Jesus",
+        "category": "Confession / Prayer",
+        "description": "Holy Mass, praise and worship, Eucharistic adoration, and laying on of hands.",
+        "source_file": "Seeded from bulletin",
+    },
+    {
+        "id": "seed-4",
+        "title": "Mid-Morning Bible Study",
+        "date_label": "Every Wednesday",
+        "time": "10:00 AM - 12:00 PM",
+        "parish": "Holy Name of Jesus",
+        "category": "Adult Formation",
+        "description": "Weekly Bible study using videos, Scripture, and the Catechism of the Catholic Church.",
+        "source_file": "Seeded from bulletin",
+    },
+])
 
-st.markdown(
-    f"""
-<div class="hero">
-    <div class="logo-wrap">
-        <div class="logo-mark">☩</div>
-        <div>
-            <h1 class="logo-title">COMMUNIO</h1>
-            <div class="logo-subtitle">A coastal Catholic guide to parish life across the Diocese of Palm Beach.</div>
-        </div>
+
+# ============================================================
+# HEADER
+# ============================================================
+
+header_left, header_right = st.columns([0.08, 0.92])
+
+with header_left:
+    st.markdown('<div class="logo-box">✛</div>', unsafe_allow_html=True)
+
+with header_right:
+    st.markdown('<div class="main-title">COMMUNIO</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="subtitle">A coastal Catholic guide to parish life across the Diocese of Palm Beach.</div>',
+        unsafe_allow_html=True
+    )
+
+
+# ============================================================
+# HERO / QUICK LINKS / BISHOP SECTION
+# ============================================================
+
+st.markdown('<div class="hero-card">', unsafe_allow_html=True)
+
+st.markdown("""
+<div class="quick-grid">
+    <div class="quick-card">
+        <a href="https://www.diocesepb.org/" target="_blank">Diocese Website</a>
+        <p>Official diocesan homepage, ministries, news, and resources.</p>
     </div>
+    <div class="quick-card">
+        <a href="https://www.diocesepb.org/news/events.html" target="_blank">Diocesan Calendar</a>
+        <p>Quick jump to official diocesan events.</p>
+    </div>
+    <div class="quick-card">
+        <a href="https://www.diocesepb.org/about-us/office-of-the-bishop.html" target="_blank">Office of the Bishop</a>
+        <p>Pastoral updates, diocesan leadership, and messages from the bishop.</p>
+    </div>
+</div>
+""", unsafe_allow_html=True)
 
-    <div class="home-grid">
-        <div class="quick-grid">
-            <div class="quick-card">
-                <a href="{DIOCESE_HOME}" target="_blank">Diocese Website</a>
-                <p>Official diocesan homepage, offices, ministries, news, and resources.</p>
-            </div>
-            <div class="quick-card">
-                <a href="{DIOCESE_EVENTS}" target="_blank">Diocesan Calendar</a>
-                <p>Quick jump to official diocesan events.</p>
-            </div>
-            <div class="quick-card">
-                <a href="{BISHOP_MESSAGE}" target="_blank">Office of the Bishop</a>
-                <p>Pastoral updates, diocesan leadership, and messages from the bishop.</p>
-            </div>
-        </div>
+bishop_image_path = "Headshot2-Chosen-FrRodriguez.jpg.webp"
 
-        <div>
-            <div class="bishop-card">
-                <img src="{bishop_src}" alt="Bishop Manuel de Jesús Rodríguez">
-                <div>
-                    <div class="bishop-kicker">Welcome from the Bishop</div>
-                    <div class="bishop-quote">{BISHOP_WELCOME}</div>
-                </div>
-            </div>
-            <div class="slideshow-card">
-                {home_slides_html}
-            </div>
+if os.path.exists(bishop_image_path):
+    import base64
+    with open(bishop_image_path, "rb") as img_file:
+        encoded_img = base64.b64encode(img_file.read()).decode()
+
+    img_html = f"data:image/webp;base64,{encoded_img}"
+else:
+    img_html = ""
+
+st.markdown(f"""
+<div class="bishop-card">
+    {'<img class="bishop-img" src="' + img_html + '">' if img_html else ''}
+    <div>
+        <div class="bishop-kicker">Welcome from the Bishop</div>
+        <div class="bishop-quote">
+            Dear brothers and sisters in Christ,<br><br>
+            How beautiful is our Church! How beautiful it is to walk in the path of Christ Jesus
+            in the company of so many beloved brothers and sisters! How beautiful is the Diocese of Palm Beach!
         </div>
     </div>
 </div>
-""",
-    unsafe_allow_html=True,
-)
+""", unsafe_allow_html=True)
 
-st.markdown(
-    """
-<div class="find-panel">
-    <div class="panel-title">Find an Event</div>
-    <div class="panel-subtitle">Search by category, parish, deanery, or keyword. Masses and sacrament schedules from uploaded PDFs are included automatically.</div>
-</div>
-""",
-    unsafe_allow_html=True,
-)
-
-finder_col1, finder_col2, finder_col3 = st.columns([1.2, 1, 1])
-with finder_col1:
-    main_search = st.text_input("Search events", placeholder="adoration, Bible study, youth, Boynton...")
-with finder_col2:
-    main_category = st.selectbox("Event category", CATEGORY_OPTIONS)
-with finder_col3:
-    main_deanery = st.selectbox("Deanery", ["All"] + sorted(parishes_df["deanery"].unique()))
-
-finder_col4, finder_col5 = st.columns([1, 1])
-with finder_col4:
-    main_parish_choice = st.selectbox("Parish", ["All"] + sorted(parishes_df["parish"].unique()))
-with finder_col5:
-    quick_view = st.radio("View", ["Events", "Parishes", "Manual Upload", "Add Event"], horizontal=True)
-
-# ============================================================
-# SIDEBAR
-# ============================================================
-
-with st.sidebar:
-    st.header("Communio")
-    st.caption("No API key required. Events shown here include seeded/manual entries, automatic PDF scans from the bulletins/ folder, and anything you add through the form.")
-    st.divider()
-    st.markdown(f"[Diocese Website]({DIOCESE_HOME})")
-    st.markdown(f"[Diocesan Calendar]({DIOCESE_EVENTS})")
-    st.markdown(f"[Office of the Bishop]({BISHOP_MESSAGE})")
-
-view = quick_view
-search = main_search
-category = main_category
-deanery = main_deanery
-parish_choice = main_parish_choice
-
-# ============================================================
-# FILTERS
-# ============================================================
-
-filtered_parishes = parishes_df.copy()
-filtered_events = events_df.copy()
-
-if deanery != "All":
-    filtered_parishes = filtered_parishes[filtered_parishes["deanery"] == deanery]
-    filtered_events = filtered_events[filtered_events["parish"].isin(filtered_parishes["parish"]) | (filtered_events["parish"] == "Diocese of Palm Beach")]
-
-if parish_choice != "All":
-    filtered_parishes = filtered_parishes[filtered_parishes["parish"] == parish_choice]
-    filtered_events = filtered_events[filtered_events["parish"] == parish_choice]
-
-if category != "All":
-    filtered_events = filtered_events[filtered_events["category"] == category]
-
-if search:
-    filtered_parishes = filtered_parishes[filtered_parishes.apply(lambda r: matches(r, search), axis=1)]
-    filtered_events = filtered_events[filtered_events.apply(lambda r: matches(r, search), axis=1)]
+st.markdown("</div>", unsafe_allow_html=True)
 
 
 # ============================================================
-# MAIN VIEWS
+# LOAD EVENTS
 # ============================================================
 
-if view == "Events":
-    st.subheader(f"Parish and Diocesan Events ({len(filtered_events)} found)")
+pdf_events = load_events_from_bulletins()
+events_df = pd.concat([seed_events, pdf_events], ignore_index=True)
 
-    if filtered_events.empty:
-        st.info("No events match your filters.")
+if not events_df.empty:
+    events_df = events_df.drop_duplicates(subset=["id"])
+
+
+# ============================================================
+# FEATURED EVENT SLIDESHOW-LIKE SECTION
+# ============================================================
+
+st.markdown("## Featured Parish Life")
+
+featured_events = events_df.head(5)
+
+if featured_events.empty:
+    st.info("Upload PDFs into the `bulletins/` folder on GitHub, then redeploy the app.")
+else:
+    featured_index = int(datetime.now().timestamp() / 5) % len(featured_events)
+    featured = featured_events.iloc[featured_index]
+
+    st.markdown(f"""
+    <div class="slide-box">
+        <div class="slide-title">{featured['title']}</div>
+        <p>{featured['date_label']} • {featured['time']}</p>
+        <p>{featured['parish']} · {featured['category']}</p>
+        <p>{featured['description']}</p>
+    </div>
+    """, unsafe_allow_html=True)
+
+
+# ============================================================
+# FIND AN EVENT GUI
+# ============================================================
+
+st.markdown("## Find an Event")
+
+filter_col1, filter_col2, filter_col3 = st.columns([1, 1, 1.4])
+
+with filter_col1:
+    selected_category = st.selectbox(
+        "Event type",
+        ["All"] + CATEGORY_OPTIONS
+    )
+
+with filter_col2:
+    parish_options = ["All"] + sorted(events_df["parish"].dropna().unique().tolist())
+    selected_parish = st.selectbox(
+        "Parish",
+        parish_options
+    )
+
+with filter_col3:
+    search_query = st.text_input(
+        "Search by keyword",
+        placeholder="Try: rosary, youth, Bible study, adoration..."
+    )
+
+
+filtered_df = events_df.copy()
+
+if selected_category != "All":
+    filtered_df = filtered_df[filtered_df["category"] == selected_category]
+
+if selected_parish != "All":
+    filtered_df = filtered_df[filtered_df["parish"] == selected_parish]
+
+if search_query.strip():
+    q = search_query.lower().strip()
+
+    filtered_df = filtered_df[
+        filtered_df.apply(
+            lambda row: q in " ".join([
+                str(row.get("title", "")),
+                str(row.get("description", "")),
+                str(row.get("parish", "")),
+                str(row.get("category", "")),
+                str(row.get("date_label", "")),
+                str(row.get("time", "")),
+            ]).lower(),
+            axis=1
+        )
+    ]
+
+
+st.markdown(f"### {len(filtered_df)} event(s) found")
+
+if filtered_df.empty:
+    st.warning("No events matched your filters.")
+else:
+    for _, row in filtered_df.iterrows():
+        st.markdown(f"""
+        <div class="event-card">
+            <div class="event-title">{row['title']}</div>
+            <div class="event-meta">{row['date_label']} • {row['time']}</div>
+            <span class="badge">{row['category']}</span>
+            <span class="badge">{row['parish']}</span>
+            <p style="margin-top:0.75rem;color:#244b58;">{row['description']}</p>
+            <div class="small-muted">Source: {row['source_file']}</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+
+# ============================================================
+# PDF STATUS / ADMIN INFO
+# ============================================================
+
+with st.expander("PDF bulletin status"):
+    if not os.path.exists(BULLETIN_FOLDER):
+        st.write("No `bulletins/` folder found yet.")
     else:
-        for _, event in filtered_events.iterrows():
-            render_event(event)
+        pdf_files = [f for f in os.listdir(BULLETIN_FOLDER) if f.lower().endswith(".pdf")]
 
-
-elif view == "Parishes":
-    st.subheader("Parish Directory")
-
-    if filtered_parishes.empty:
-        st.info("No parishes match your filters.")
-    else:
-        for _, row in filtered_parishes.sort_values(["deanery", "city", "parish"]).iterrows():
-            render_parish(row)
-
-
-elif view == "Manual Upload":
-    st.subheader("Manual Bulletin Upload")
-
-    st.write(
-        "Upload a bulletin PDF without an OpenAI API key. The app will run a simple keyword scan, "
-        "show possible events, and save them as manual uploads. You can clean them up later with the Add Event form."
-    )
-
-    parish_for_upload = st.selectbox(
-        "Parish for this bulletin",
-        sorted(parishes_df["parish"].unique()),
-        key="upload_parish",
-    )
-
-    uploaded_files = st.file_uploader(
-        "Upload bulletin PDFs",
-        type=["pdf"],
-        accept_multiple_files=True,
-    )
-
-    if st.button("Scan and save possible events"):
-        if not uploaded_files:
-            st.error("Upload at least one PDF first.")
+        if not pdf_files:
+            st.write("No PDFs found in the `bulletins/` folder.")
         else:
-            all_found = []
-            for pdf in uploaded_files:
-                text = extract_text_from_pdf(pdf)
-                found = keyword_extract_events(text, parish_for_upload, pdf.name)
-                all_found.extend(found)
+            st.write(f"Found {len(pdf_files)} PDF bulletin(s):")
+            for file in pdf_files:
+                st.write(f"- {file}")
 
-            added = save_many_events(all_found)
-            st.success(f"Saved {added} possible manual events to {DATA_FILE}.")
+    st.markdown("""
+    **How to add more bulletins:**
 
-            if all_found:
-                st.write("Preview:")
-                for event in all_found[:8]:
-                    render_event(pd.Series(event))
-
-
-elif view == "Add Event":
-    st.subheader("Add a Manual Event")
-
-    with st.form("manual_event_form"):
-        parish = st.selectbox("Parish", sorted(parishes_df["parish"].unique()))
-        title = st.text_input("Event title")
-        date_label = st.text_input("Date", placeholder="Example: Saturday, May 23, 2026")
-        time = st.text_input("Time", placeholder="Example: 9:00 AM – 11:45 AM")
-        location = st.text_input("Location")
-        category_value = st.selectbox("Category", CATEGORY_OPTIONS[1:])
-        description = st.text_area("Description")
-        source_url = st.text_input("Bulletin/source URL", placeholder="Optional")
-        submitted = st.form_submit_button("Save event")
-
-    if submitted:
-        if not title:
-            st.error("Please add an event title.")
-        else:
-            save_manual_event({
-                "title": title,
-                "date_label": date_label,
-                "time": time,
-                "location": location,
-                "category": category_value,
-                "description": description,
-                "parish": parish,
-                "source": "Manual website entry",
-                "source_url": source_url,
-            })
-            st.success("Event saved. Go to Events to see it.")
+    1. In GitHub, create a folder named `bulletins`.
+    2. Upload bulletin PDFs into that folder.
+    3. Name them clearly, for example:
+       - `Holy_Name_of_Jesus_2026_05_03.pdf`
+       - `Basilica_of_Saint_Edward_2026_04_26.pdf`
+       - `Saint_Thomas_More_2026_04.pdf`
+    4. Redeploy or reboot Streamlit.
+    """)
