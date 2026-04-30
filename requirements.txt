@@ -2,6 +2,7 @@ streamlit
 pandas
 openai
 pdfplumber
+pillow
 PyPDF2
 requests
 beautifulsoup4
