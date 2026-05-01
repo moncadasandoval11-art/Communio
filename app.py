@@ -452,51 +452,62 @@ def find_time_near_line(line, context):
     return ""
 
 
-def looks_like_event_line(line):
-    text = normalize(line)
-    event_keywords = [
-        "workshop", "gathering", "study", "bible", "rosary", "novena",
-        "adoration", "revival", "retreat", "youth", "world youth day",
-        "luncheon", "meeting", "guild", "ministry", "volunteer",
-        "first communion", "confirmation", "mass", "confession", "reconciliation",
-        "prayer", "festival", "fundraiser", "sale", "speaker",
-        "formation", "oica", "rcia", "carmelite", "knights of columbus",
-        "columbiettes", "legion of mary", "parents", "pareja",
-        "marriage", "food pantry", "outreach", "baptism", "baptismal"
-    ]
-    has_keyword = any(keyword in text for keyword in event_keywords)
-    has_time = bool(re.search(r"\d{1,2}(:\d{2})?\s*(am|pm)", text)) or "noon" in text
-    has_date_word = any(day in text for day in [
-        "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday",
-        "may", "june", "july", "august", "september", "october", "november", "december",
-        "january", "february", "march", "april"
-    ])
-    if has_keyword and (has_time or has_date_word):
-        return True
-    if has_keyword and len(line) < 160:
-        return True
-    return False
-
 
 def make_event_id(parish, title, date_label, time_label):
     raw = f"{parish}-{title}-{date_label}-{time_label}"
     return hashlib.md5(raw.encode()).hexdigest()
 
 
+# ============================================================
+# SMART BULLETIN EXTRACTION
+# ============================================================
+
 def _normalize_pdf_schedule_text(text):
-    """Makes PDF text easier to regex: fixes missing spaces like 8:00AM and 12Noon."""
-    text = text.replace("\u2014", "-").replace("\u2013", "-")
+    """
+    Clean PDF text without changing the website layout.
+    This helps with bulletin text like 8:00AM, 12Noon, SaturdayEveningVigilMass, etc.
+    """
+    text = text or ""
+    text = text.replace("\u2014", "-").replace("\u2013", "-").replace("\u00a0", " ")
     text = re.sub(r"(?i)(\d{1,2}:\d{2})(am|pm)", r"\1 \2", text)
     text = re.sub(r"(?i)(\d{1,2})(am|pm)", r"\1 \2", text)
     text = re.sub(r"(?i)(\d{1,2})(noon)", r"\1 Noon", text)
-    text = re.sub(r"(?i)&\s*12\s*Noon", ", 12:00 PM", text)
-    text = re.sub(r"(?i)12\s*Noon", "12:00 PM", text)
+    text = re.sub(r"(?i)\b12\s*noon\b", "12:00 PM", text)
+
+    # Add spaces around common glued words from PDF extraction.
+    replacements = {
+        "MASSINTENTIONS": "MASS INTENTIONS",
+        "SUMMERMASSSCHEDULE": "SUMMER MASS SCHEDULE",
+        "MASSSCHEDULE": "MASS SCHEDULE",
+        "SundayMasses": "Sunday Masses",
+        "SaturdayEveningVigilMass": "Saturday Evening Vigil Mass",
+        "DailyMass": "Daily Mass",
+        "CONFESSIONS": "CONFESSIONS",
+        "SACRAMENTS": "SACRAMENTS",
+        "ADORATION": "ADORATION",
+    }
+    for old, new in replacements.items():
+        text = text.replace(old, new)
+
     return text
 
 
-def _extract_times(text):
+def _clean_lines(text):
     text = _normalize_pdf_schedule_text(text)
-    raw_times = re.findall(r"(?i)\b\d{1,2}:\d{2}\s*(?:am|pm)\b|\b\d{1,2}\s*(?:am|pm)\b", text)
+    return [clean_text(line) for line in text.splitlines() if clean_text(line)]
+
+
+def _extract_times(text):
+    """
+    Extract real times from a local schedule/event context.
+    Does not decide whether something is an event; it only normalizes time strings.
+    """
+    text = _normalize_pdf_schedule_text(text)
+    raw_times = re.findall(
+        r"(?i)\b\d{1,2}:\d{2}\s*(?:am|pm)\b|\b\d{1,2}\s*(?:am|pm)\b",
+        text
+    )
+
     cleaned = []
     for t in raw_times:
         t = clean_text(t).upper().replace(" ", "")
@@ -505,11 +516,24 @@ def _extract_times(text):
             t = t.replace(" AM", ":00 AM").replace(" PM", ":00 PM")
         if t not in cleaned:
             cleaned.append(t)
+
     return cleaned
 
 
-def _add_event(events, parish, source_file, title, date_label, time_label, category, description):
-    event = {
+def _has_time(text):
+    return bool(_extract_times(text))
+
+
+def _add_event(events, parish, source_file, title, date_label, time_label, category, description, confidence="rule"):
+    title = clean_text(title)
+    date_label = clean_text(date_label) or "See bulletin"
+    time_label = clean_text(time_label) or "See bulletin"
+    description = clean_text(description)
+
+    if not title:
+        return
+
+    events.append({
         "id": make_event_id(parish, title, date_label, time_label),
         "title": title,
         "date_label": date_label,
@@ -518,91 +542,375 @@ def _add_event(events, parish, source_file, title, date_label, time_label, categ
         "category": category,
         "description": description,
         "source_file": source_file,
-    }
-    events.append(event)
+        "confidence": confidence,
+    })
 
 
-def extract_recurring_sacrament_events(text, parish, source_file):
-    """Extract recurring Mass, confession, adoration, rosary, and basic sacrament schedules."""
-    events = []
-    text = _normalize_pdf_schedule_text(text)
-    lines = [clean_text(l) for l in text.splitlines() if clean_text(l)]
+def _is_noise_or_ad(text):
+    """
+    Reject lines that mention Catholic words but are not parish events:
+    Mass intentions, readings, ads, phone/address blocks, online bulletin footers, etc.
+    """
+    low = normalize(text)
+
+    noise_phrases = [
+        "mass intentions",
+        "unscheduled masses",
+        "scripture readings",
+        "readings for this sunday",
+        "view this bulletin online",
+        "for ad info",
+        "catholic cruises",
+        "catholicmatch",
+        "insurance",
+        "abogado",
+        "incorporated",
+        "contractors",
+        "funeral",
+        "cemetery",
+        "advertise",
+        "parishioner certificate",
+        "pope s intentions",
+        "gospel meditation",
+        "meditacion del evangelio",
+        "offertory",
+        "dsa goal",
+        "second collection",
+        "parish clergy",
+        "rectory office hours",
+        "staff",
+        "phone",
+        "email",
+        "website",
+        "fax",
+    ]
+
+    if any(p in low for p in noise_phrases):
+        return True
+
+    # Reject mostly contact / address / ad lines.
+    if re.search(r"\b\d{3}[-.]\d{3}[-.]\d{4}\b", text) and not any(k in low for k in ["call to register", "for information", "contact"]):
+        if not any(k in low for k in ["workshop", "retreat", "study", "meeting", "adoration", "confession", "mass schedule"]):
+            return True
+
+    if len(text) > 260 and not any(k in low for k in ["where", "when", "time", "join us", "meets", "schedule"]):
+        return True
+
+    return False
+
+
+def _is_mass_intention_context(context):
+    low = normalize(context)
+    return any(p in low for p in [
+        "mass intentions",
+        "unscheduled masses",
+        "by ",
+        "special int",
+        "parishioners and benefactors",
+        "for the souls",
+        "deceased",
+        "intention",
+        "intensions",
+    ])
+
+
+def _get_schedule_windows(lines):
+    """
+    Pull only the parts of the bulletin that are likely to contain real recurring schedules.
+    This prevents the extractor from treating every Mass intention as a separate event.
+    """
+    windows = []
+    schedule_markers = [
+        "mass schedule", "celebration of the eucharist", "sacraments",
+        "confessions", "confession", "adoration", "summer mass schedule",
+        "daily mass", "sunday masses", "saturday vigil"
+    ]
 
     for i, line in enumerate(lines):
-        context = " ".join(lines[max(0, i-1): min(len(lines), i+4)])
-        line_context = _normalize_pdf_schedule_text(line + " " + context)
-        low = line_context.lower()
+        low = normalize(line)
+        if any(marker in low for marker in schedule_markers):
+            block = " ".join(lines[i:min(len(lines), i + 8)])
+            windows.append(block)
 
-        # Daily/weekday Mass patterns
-        if any(k in low for k in ["daily mass", "monday through friday", "mon - fri", "mon-fri", "monday-friday"]):
-            for time_str in _extract_times(line_context):
-                _add_event(events, parish, source_file, "Daily Mass", "Monday-Friday", time_str, "Liturgy / Mass", "Recurring weekday Mass listed in bulletin schedule.")
+    # Also include the first two pages worth of text because most bulletins put schedules there.
+    if lines:
+        windows.append(" ".join(lines[:80]))
 
-        # Saturday morning Mass
-        if "saturday" in low and "mass" in low and "vigil" not in low:
-            for time_str in _extract_times(line_context):
-                _add_event(events, parish, source_file, "Saturday Mass", "Saturday", time_str, "Liturgy / Mass", "Saturday Mass listed in bulletin schedule.")
+    return windows
 
-        # Saturday Vigil Mass
-        if "vigil" in low and ("mass" in low or "saturday" in low):
-            for time_str in _extract_times(line_context):
-                _add_event(events, parish, source_file, "Saturday Vigil Mass", "Saturday", time_str, "Liturgy / Mass", "Sunday Vigil Mass listed in bulletin schedule.")
 
-        # Sunday Masses
-        if "sunday" in low and "mass" in low:
-            for time_str in _extract_times(line_context):
-                _add_event(events, parish, source_file, "Sunday Mass", "Sunday", time_str, "Liturgy / Mass", "Recurring Sunday Mass listed in bulletin schedule.")
+def _day_label_from_context(text, default="See bulletin"):
+    low = normalize(text)
 
-        # Spanish / bilingual Mass labels
-        if ("spanish mass" in low or "misa" in low or "bilingual" in low) and "mass" in low:
-            label = "Spanish/Bilingual Mass" if "bilingual" in low else "Spanish Mass"
-            day = "Sunday" if "sunday" in low or "domingo" in low else "See bulletin"
-            for time_str in _extract_times(line_context):
-                _add_event(events, parish, source_file, label, day, time_str, "Liturgy / Mass", "Language-specific Mass listed in bulletin schedule.")
+    if ("monday" in low and "friday" in low) or "mon fri" in low or "mon - fri" in low:
+        return "Monday-Friday"
+    if "monday" in low and "saturday" in low:
+        return "Monday-Saturday"
+    if "saturday" in low or "sabado" in low:
+        return "Saturday"
+    if "sunday" in low or "domingo" in low:
+        return "Sunday"
+    if "wednesday" in low or "miercoles" in low:
+        return "Wednesday"
+    if "thursday" in low or "jueves" in low:
+        return "Thursday"
+    if "friday" in low or "viernes" in low:
+        return "Friday"
 
-        # Confession / Reconciliation
-        if any(k in low for k in ["confession", "confessions", "reconciliation", "penance"]):
-            day = "Saturday" if "saturday" in low or "sabado" in low else "Weekly"
-            for time_str in _extract_times(line_context):
-                _add_event(events, parish, source_file, "Confession", day, time_str, "Confession / Prayer", "Sacrament of Reconciliation listed in bulletin schedule.")
+    return default
 
-        # Adoration
-        if "adoration" in low or "blessed sacrament" in low or "exposition" in low:
-            date_label = "Monday-Friday" if "monday" in low and "friday" in low else "See bulletin"
-            times = _extract_times(line_context)
-            if times:
-                time_label = " - ".join(times[:2]) if len(times) >= 2 else times[0]
-            else:
-                time_label = "See bulletin"
-            _add_event(events, parish, source_file, "Eucharistic Adoration", date_label, time_label, "Adoration", "Recurring Eucharistic adoration listed in bulletin schedule.")
 
-        # Rosary / novenas
-        if "rosary" in low or "rosario" in low or "novena" in low:
-            times = _extract_times(line_context)
-            time_label = times[0] if times else "See bulletin"
-            title = "Rosary" if "rosary" in low or "rosario" in low else "Novena"
-            _add_event(events, parish, source_file, title, "See bulletin", time_label, "Confession / Prayer", line_context[:250])
+def _extract_schedule_items_from_window(window, parish, source_file):
+    """
+    Extract recurring sacramental schedules only from schedule-looking windows.
+    This is intentionally stricter than a keyword search.
+    """
+    events = []
+    window = _normalize_pdf_schedule_text(window)
+    low = normalize(window)
+
+    # Reject the whole block if it is clearly Mass intentions / readings / ads.
+    if _is_mass_intention_context(window) and not any(k in low for k in ["mass schedule", "celebration of the eucharist", "sacraments"]):
+        return events
+
+    # Mass schedule lines/blocks.
+    if any(k in low for k in ["mass schedule", "celebration of the eucharist", "daily mass", "sunday masses", "saturday vigil", "vigil mass"]):
+        # Daily / weekday Mass.
+        daily_patterns = [
+            r"(?is)(?:daily mass|monday\s*(?:through|-|to)\s*friday|mon\s*-?\s*fri).*?(?=(?:saturday|sunday|confession|adoration|$))",
+            r"(?is)(?:monday\s*(?:through|-|to)\s*saturday).*?(?=(?:sunday|confession|adoration|$))",
+        ]
+
+        for pattern in daily_patterns:
+            for match in re.finditer(pattern, window):
+                block = match.group(0)
+                if _is_mass_intention_context(block):
+                    continue
+                for time_str in _extract_times(block):
+                    _add_event(
+                        events, parish, source_file,
+                        "Daily Mass", _day_label_from_context(block, "Monday-Friday"),
+                        time_str, "Liturgy / Mass",
+                        "Recurring Mass schedule extracted from the bulletin's sacrament/schedule section.",
+                        "schedule"
+                    )
+
+        # Saturday Vigil Mass.
+        vigil_patterns = [
+            r"(?is)(?:saturday\s*(?:evening)?\s*vigil\s*mass|vigil\s*mass).*?(?=(?:sunday|daily|confession|adoration|$))",
+            r"(?is)(?:saturday\s*vigil).*?(?=(?:sunday|daily|confession|adoration|$))",
+        ]
+
+        for pattern in vigil_patterns:
+            for match in re.finditer(pattern, window):
+                block = match.group(0)
+                for time_str in _extract_times(block):
+                    _add_event(
+                        events, parish, source_file,
+                        "Saturday Vigil Mass", "Saturday", time_str,
+                        "Liturgy / Mass",
+                        "Saturday Vigil Mass schedule extracted from the bulletin's schedule section.",
+                        "schedule"
+                    )
+
+        # Sunday Masses.
+        sunday_patterns = [
+            r"(?is)(?:sunday\s*masses|sunday\s*mass|sunday).*?(?=(?:daily|monday|saturday|confession|adoration|$))",
+        ]
+
+        for pattern in sunday_patterns:
+            for match in re.finditer(pattern, window):
+                block = match.group(0)
+                if "readings" in normalize(block):
+                    continue
+                for time_str in _extract_times(block):
+                    _add_event(
+                        events, parish, source_file,
+                        "Sunday Mass", "Sunday", time_str,
+                        "Liturgy / Mass",
+                        "Sunday Mass schedule extracted from the bulletin's schedule section.",
+                        "schedule"
+                    )
+
+        # If schedule block is compact, like "SATURDAY VIGIL 4:00pm / SUNDAY 8:00am..."
+        compact_parts = re.split(r"(?i)\b(SATURDAY VIGIL|SUNDAY|DAILY MASS|CONFESSIONS|ADORATION)\b", window)
+        for idx in range(1, len(compact_parts), 2):
+            header = compact_parts[idx]
+            body = compact_parts[idx + 1] if idx + 1 < len(compact_parts) else ""
+            block = header + " " + body[:250]
+            hlow = normalize(header)
+            if "saturday vigil" in hlow:
+                for time_str in _extract_times(block):
+                    _add_event(events, parish, source_file, "Saturday Vigil Mass", "Saturday", time_str, "Liturgy / Mass", "Saturday Vigil Mass schedule.", "schedule")
+            elif hlow == "sunday":
+                for time_str in _extract_times(block):
+                    _add_event(events, parish, source_file, "Sunday Mass", "Sunday", time_str, "Liturgy / Mass", "Sunday Mass schedule.", "schedule")
+            elif "daily mass" in hlow:
+                for time_str in _extract_times(block):
+                    _add_event(events, parish, source_file, "Daily Mass", "Monday-Friday", time_str, "Liturgy / Mass", "Daily Mass schedule.", "schedule")
+
+    # Confession schedule.
+    if any(k in low for k in ["confession", "confessions", "reconciliation", "penance"]):
+        confession_blocks = re.findall(
+            r"(?is)(?:confession|confessions|reconciliation|penance).*?(?=(?:adoration|mass schedule|daily mass|sunday masses|baptism|marriage|$))",
+            window
+        )
+        for block in confession_blocks:
+            if _is_noise_or_ad(block):
+                continue
+            for time_str in _extract_times(block):
+                _add_event(
+                    events, parish, source_file,
+                    "Confession", _day_label_from_context(block, "Weekly"),
+                    time_str, "Confession / Prayer",
+                    "Confession/Reconciliation schedule extracted from the bulletin's sacrament section.",
+                    "schedule"
+                )
+
+    # Adoration schedule.
+    if any(k in low for k in ["adoration", "exposition", "blessed sacrament"]):
+        adoration_blocks = re.findall(
+            r"(?is)(?:adoration|exposition|blessed sacrament).*?(?=(?:confession|mass schedule|daily mass|sunday masses|baptism|marriage|$))",
+            window
+        )
+        for block in adoration_blocks:
+            if _is_noise_or_ad(block):
+                continue
+            times = _extract_times(block)
+            time_label = " - ".join(times[:2]) if len(times) >= 2 else (times[0] if times else "See bulletin")
+            _add_event(
+                events, parish, source_file,
+                "Eucharistic Adoration", _day_label_from_context(block, "See bulletin"),
+                time_label, "Adoration",
+                "Eucharistic Adoration schedule extracted from the bulletin's sacrament/schedule section.",
+                "schedule"
+            )
 
     return events
 
 
+def extract_recurring_sacrament_events(text, parish, source_file):
+    """
+    Extract recurring schedules from schedule sections only.
+    This avoids false positives such as Mass intentions, ads, readings, or articles mentioning Mass.
+    """
+    events = []
+    lines = _clean_lines(text)
+
+    for window in _get_schedule_windows(lines):
+        events.extend(_extract_schedule_items_from_window(window, parish, source_file))
+
+    unique = {}
+    for e in events:
+        unique[e["id"]] = e
+
+    return list(unique.values())
+
+
+def _event_quality_score(line, context):
+    """
+    Scores whether a line is a real event listing rather than an article/ad/random sentence.
+    A line must have enough structure: title + time/date/meeting words, and must avoid noise.
+    """
+    combined = clean_text(line + " " + context)
+    low = normalize(combined)
+
+    if _is_noise_or_ad(combined) or _is_mass_intention_context(combined):
+        return 0
+
+    score = 0
+
+    # Strong event structure.
+    if re.search(r"(?i)\b(where|when|time|date|join us|meets?|meeting|register|registration|call to register|contact)\b", combined):
+        score += 3
+
+    if find_date_near_line(line, context):
+        score += 3
+
+    if find_time_near_line(line, context):
+        score += 3
+
+    # Good event category words.
+    category_words = [
+        "workshop", "retreat", "bible study", "faith formation", "oica", "rcia",
+        "youth", "young adult", "luncheon", "gathering", "festival", "speaker",
+        "meeting", "ministry", "volunteer", "food pantry", "outreach",
+        "knights of columbus", "columbiettes", "legion of mary",
+        "carmelite", "may crowning", "revival", "adoration",
+        "rosary", "novena", "prayer group", "marriage", "couples", "parejas"
+    ]
+
+    if any(word in low for word in category_words):
+        score += 3
+
+    # Recurrence clues.
+    recurrence_words = [
+        "every", "weekly", "monthly", "second monday", "second wednesday",
+        "third friday", "last monday", "each month", "todos", "cada",
+        "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"
+    ]
+
+    if any(word in low for word in recurrence_words):
+        score += 2
+
+    # Avoid vague theology/article sentences.
+    article_words = ["gospel", "reading", "meditation", "pope", "scripture", "reflection", "homily"]
+    if any(word in low for word in article_words) and not any(word in low for word in ["join", "meets", "workshop", "study", "prayer group"]):
+        score -= 4
+
+    return score
+
+
+def _make_title_from_event_context(line, context):
+    """
+    Prefer the short uppercase/event-like heading as title.
+    """
+    title = clean_text(line)
+
+    # If line is "Where/When/Time", use previous heading from context.
+    if normalize(title) in {"where", "when", "time", "date"} or re.match(r"(?i)^(where|when|time|date)\s*:", title):
+        parts = [p.strip() for p in context.split("  ") if p.strip()]
+        for p in parts:
+            if len(p) <= 90 and not re.match(r"(?i)^(where|when|time|date)\s*:", p):
+                return p
+
+    # Trim very long descriptions.
+    if len(title) > 110:
+        title = title[:110] + "..."
+
+    return title
+
+
 def extract_general_bulletin_events(text, parish, source_file):
-    lines = [clean_text(line) for line in text.splitlines() if clean_text(line)]
+    """
+    Extract non-schedule events using structure and context, not just keywords.
+    This requires a useful date/time/recurrence clue and rejects ads, articles, Mass intentions, and readings.
+    """
+    lines = _clean_lines(text)
     events = []
 
     for i, line in enumerate(lines):
-        if not looks_like_event_line(line):
+        if _is_noise_or_ad(line):
             continue
 
-        previous_line = lines[i - 1] if i > 0 else ""
-        next_line = lines[i + 1] if i + 1 < len(lines) else ""
-        second_next_line = lines[i + 2] if i + 2 < len(lines) else ""
-        context = " ".join([previous_line, next_line, second_next_line])
+        previous_lines = lines[max(0, i - 3):i]
+        next_lines = lines[i + 1:min(len(lines), i + 5)]
+        context = " ".join(previous_lines + next_lines)
 
-        title = line[:110] + ("..." if len(line) > 110 else "")
-        date_label = find_date_near_line(line, context)
-        time_label = find_time_near_line(line, context)
-        description = clean_text(" ".join([line, next_line, second_next_line]))
+        score = _event_quality_score(line, context)
+        if score < 5:
+            continue
+
+        # Avoid creating a general event for the sacrament schedule itself;
+        # those are handled by extract_recurring_sacrament_events.
+        low = normalize(line + " " + context)
+        if any(k in low for k in ["mass schedule", "celebration of the eucharist", "sunday masses", "daily mass", "confessions"]):
+            continue
+
+        title = _make_title_from_event_context(line, context)
+        date_label = find_date_near_line(line, context) or _day_label_from_context(line + " " + context, "See bulletin")
+        time_label = find_time_near_line(line, context) or "See bulletin"
+        description = clean_text(" ".join([line] + next_lines[:3]))
         category = infer_category(title, description)
 
         _add_event(
@@ -610,16 +918,26 @@ def extract_general_bulletin_events(text, parish, source_file):
             parish,
             source_file,
             title,
-            date_label if date_label else "See bulletin",
-            time_label if time_label else "See bulletin",
+            date_label,
+            time_label,
             category,
             description,
+            "scored"
         )
 
-    return events
+    unique = {}
+    for e in events:
+        unique[e["id"]] = e
+
+    return list(unique.values())
 
 
 def extract_events_from_text(text, parish, source_file):
+    """
+    Main extraction:
+    1. Extract recurring sacrament schedules from schedule sections only.
+    2. Extract other events only when the line has event-like structure.
+    """
     events = []
     events.extend(extract_recurring_sacrament_events(text, parish, source_file))
     events.extend(extract_general_bulletin_events(text, parish, source_file))
@@ -627,6 +945,7 @@ def extract_events_from_text(text, parish, source_file):
     unique = {}
     for event in events:
         unique[event["id"]] = event
+
     return list(unique.values())
 
 
