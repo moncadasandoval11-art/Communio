@@ -2,6 +2,7 @@ import os
 import re
 import hashlib
 from datetime import datetime
+from urllib.parse import quote_plus
 
 import pandas as pd
 import pdfplumber
@@ -176,6 +177,37 @@ st.markdown("""
 .small-muted {
     color: #5f7c86;
 }
+.detail-card {
+    background: rgba(255,255,255,0.95);
+    border: 1px solid rgba(8,126,139,0.18);
+    border-radius: 24px;
+    padding: 24px;
+    box-shadow: 0 12px 28px rgba(7,59,76,0.10);
+    margin-top: 20px;
+}
+
+.detail-title {
+    color: #073b4c;
+    font-size: 2rem;
+    font-weight: 900;
+    margin-bottom: 0.25rem;
+}
+
+.detail-map {
+    border-radius: 20px;
+    overflow: hidden;
+    border: 1px solid rgba(8,126,139,0.18);
+    box-shadow: 0 10px 24px rgba(7,59,76,0.12);
+}
+
+.stButton > button {
+    border-radius: 999px;
+    border: 1px solid rgba(8,126,139,0.35);
+    background: linear-gradient(135deg, #087e8b, #39b8c8);
+    color: white;
+    font-weight: 800;
+}
+
 </style>
 """, unsafe_allow_html=True)
 
@@ -245,6 +277,130 @@ PARISHES = [
 ]
 
 parish_df = pd.DataFrame(PARISHES)
+
+
+# ============================================================
+# EVENT DETAIL PAGE HELPERS
+# ============================================================
+
+def get_parish_info(parish_name):
+    matches = parish_df[parish_df["parish"] == parish_name]
+    if matches.empty:
+        return {"parish": parish_name, "city": "", "deanery": ""}
+    return matches.iloc[0].to_dict()
+
+
+def detect_event_language(text):
+    low = normalize(text)
+
+    spanish_words = [
+        "espanol", "español", "misa en espanol", "misa en español", "sabado",
+        "sábado", "domingo", "jueves", "viernes", "miercoles", "miércoles",
+        "confesiones", "adoracion", "adoración", "parejas", "matrimonial",
+        "rosario", "oracion", "oración", "comunion", "comunión"
+    ]
+
+    haitian_creole_words = [
+        "haitian", "creole", "kreyol", "créole", "lekty", "lekti", "semèn", "ayisyen"
+    ]
+
+    if any(word in low for word in spanish_words):
+        return "Spanish / Español"
+    if any(word in low for word in haitian_creole_words):
+        return "Haitian Creole"
+    return "Not specified"
+
+
+def build_event_summary(row):
+    title = clean_text(row.get("title", "Event"))
+    parish = clean_text(row.get("parish", "the parish"))
+    category = clean_text(row.get("category", "event"))
+    date_label = clean_text(row.get("date_label", "See bulletin"))
+    time_label = clean_text(row.get("time", "See bulletin"))
+    description = clean_text(row.get("description", ""))
+    language = detect_event_language(" ".join([title, description, category]))
+
+    if description and description.lower() not in {"see bulletin", ""}:
+        sentence = description
+    else:
+        sentence = f"{title} is listed in the parish bulletin as a {category.lower()} event."
+
+    extra = ""
+    if language != "Not specified":
+        extra = f" The bulletin text suggests this event may be in {language}."
+
+    return f"{sentence} This listing is for {parish}, scheduled for {date_label} at {time_label}.{extra}"
+
+
+def render_event_detail_page(event_row):
+    parish_name = clean_text(event_row.get("parish", ""))
+    parish_info = get_parish_info(parish_name)
+    city = clean_text(parish_info.get("city", ""))
+    deanery = clean_text(parish_info.get("deanery", ""))
+    category = clean_text(event_row.get("category", ""))
+    title = clean_text(event_row.get("title", "Event Detail"))
+    date_label = clean_text(event_row.get("date_label", "See bulletin"))
+    time_label = clean_text(event_row.get("time", "See bulletin"))
+    source_file = clean_text(event_row.get("source_file", ""))
+    description = build_event_summary(event_row)
+    language = detect_event_language(" ".join([title, event_row.get("description", ""), category]))
+
+    map_query = quote_plus(f"{parish_name} Catholic Church {city} Florida")
+    maps_embed_url = f"https://www.google.com/maps?q={map_query}&output=embed"
+    maps_open_url = f"https://www.google.com/maps/search/?api=1&query={map_query}"
+
+    if st.button("← Back to events", key="back_to_events_top"):
+        st.query_params.clear()
+        st.rerun()
+
+    st.markdown(f"""
+    <div class="detail-card">
+        <div class="detail-title">{title}</div>
+        <div class="event-meta">{date_label} • {time_label}</div>
+        <span class="badge">{category}</span>
+        <span class="badge">{parish_name}</span>
+        <span class="badge">{deanery}</span>
+        <p style="margin-top:1rem;color:#244b58;font-size:1.05rem;line-height:1.6;">{description}</p>
+        <p class="small-muted"><b>Language:</b> {language}</p>
+        <p class="small-muted"><b>Source bulletin:</b> {source_file}</p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    left, right = st.columns([1.15, 0.85])
+
+    with left:
+        st.markdown("""
+        <h3 style="color:#073b4c; margin-top:1.25rem; font-weight:900;">Parish Location</h3>
+        """, unsafe_allow_html=True)
+        st.markdown(f"""
+        <div class="detail-map">
+            <iframe
+                src="{maps_embed_url}"
+                width="100%"
+                height="360"
+                style="border:0;"
+                allowfullscreen=""
+                loading="lazy"
+                referrerpolicy="no-referrer-when-downgrade">
+            </iframe>
+        </div>
+        """, unsafe_allow_html=True)
+
+    with right:
+        st.markdown(f"""
+        <div class="detail-card">
+            <h3 style="color:#073b4c;margin-top:0;">{parish_name}</h3>
+            <p style="color:#244b58;"><b>City:</b> {city or 'Not listed'}</p>
+            <p style="color:#244b58;"><b>Deanery:</b> {deanery or 'Not listed'}</p>
+            <p style="color:#244b58;"><b>Event type:</b> {category}</p>
+            <p><a href="{maps_open_url}" target="_blank" style="color:#087e8b;font-weight:900;">Open in Google Maps</a></p>
+        </div>
+        """, unsafe_allow_html=True)
+
+    if st.button("← Back to events", key="back_to_events_bottom"):
+        st.query_params.clear()
+        st.rerun()
+
 
 
 # ============================================================
@@ -1217,6 +1373,25 @@ events_df = pd.concat([seed_events, pdf_events], ignore_index=True)
 
 if not events_df.empty:
     events_df = events_df.drop_duplicates(subset=["id"])
+
+
+# ============================================================
+# EVENT DETAIL ROUTING
+# ============================================================
+
+selected_event_id = st.query_params.get("event")
+if isinstance(selected_event_id, list):
+    selected_event_id = selected_event_id[0] if selected_event_id else None
+
+if selected_event_id and not events_df.empty:
+    selected_match = events_df[events_df["id"].astype(str) == str(selected_event_id)]
+    if not selected_match.empty:
+        render_event_detail_page(selected_match.iloc[0])
+        st.stop()
+    else:
+        st.warning("That event could not be found. Returning to the event list.")
+        st.query_params.clear()
+
     events_df = events_df[
         ~events_df.apply(lambda row: _is_bad_extracted_event(row.to_dict()), axis=1)
     ].reset_index(drop=True)
@@ -1334,6 +1509,10 @@ else:
             <div class="small-muted">Source: {row['source_file']}</div>
         </div>
         """, unsafe_allow_html=True)
+
+        if st.button("View event details", key=f"view_event_{row['id']}"):
+            st.query_params["event"] = str(row["id"])
+            st.rerun()
 
 # PDF STATUS / ADMIN INFO
 # ============================================================
