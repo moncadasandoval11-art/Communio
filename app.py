@@ -546,19 +546,90 @@ def _add_event(events, parish, source_file, title, date_label, time_label, categ
     })
 
 
+def _looks_like_ocr_garbage(text):
+    """
+    Detect PDF text-extraction junk, especially duplicated characters from scanned bulletins.
+    Example junk: 77::3300 aamm SSII Apprriill TThhuurrss.
+    """
+    raw = str(text or "")
+    low = raw.lower()
+
+    # Broken OCR time patterns like 77::3300, 1122::0055, 55::3300.
+    if re.search(r"\d{2,}\s*::\s*\d{2,}", low):
+        return True
+
+    # Any double colon in a supposed time/event line is almost always bad PDF extraction.
+    if "::" in low:
+        return True
+
+    # Repeated OCR letters across a line: Apprriill, TThhuurrss, aamm, ppmm, SSII.
+    repeated_pairs = re.findall(r"([A-Za-z])\1", raw)
+    if len(repeated_pairs) >= 4:
+        return True
+
+    # Very digit-heavy lines are usually tables/intentions, not event listings.
+    if len(raw) > 35:
+        digit_count = sum(ch.isdigit() for ch in raw)
+        if digit_count >= 12:
+            return True
+
+    # Corrupted AM/PM tokens.
+    if re.search(r"(?i)\b(?:aamm|ppmm)\b", raw):
+        return True
+
+    return False
+
+
+def _looks_like_mass_intention_table_line(text):
+    """Reject Mass-intention table rows that are not public events."""
+    low = normalize(text)
+
+    intention_markers = [
+        " si ", " special int", " intention", " intensions", " intentions",
+        " by ", " deceased", " parishioners and benefactors", " souls purgatory",
+        " ada leon", " roberto landron", " keith mowery"
+    ]
+
+    # Lines with a time plus a person's name/intentions are usually Mass intention rows.
+    has_time = bool(re.search(r"(?i)\b\d{1,2}:\d{2}\s*(?:am|pm)\b", text))
+    has_intention_marker = any(marker.strip() in low for marker in intention_markers)
+
+    if has_time and has_intention_marker:
+        return True
+
+    # If line is mostly a time + SI + names, reject.
+    if re.search(r"(?i)\bSI\b|†", text) and has_time:
+        return True
+
+    return False
+
+
 def _is_noise_or_ad(text):
     """
     Reject lines that mention Catholic words but are not parish events:
-    Mass intentions, readings, ads, phone/address blocks, online bulletin footers, etc.
+    Mass intentions, readings, ads, phone/address blocks, online bulletin footers,
+    OCR junk, and staff/contact blocks.
     """
+    text = clean_text(text)
     low = normalize(text)
+
+    if not text:
+        return True
+
+    if _looks_like_ocr_garbage(text):
+        return True
+
+    if _looks_like_mass_intention_table_line(text):
+        return True
 
     noise_phrases = [
         "mass intentions",
+        "mass intention",
         "unscheduled masses",
         "scripture readings",
         "readings for this sunday",
         "view this bulletin online",
+        "discovermass com",
         "for ad info",
         "catholic cruises",
         "catholicmatch",
@@ -569,6 +640,7 @@ def _is_noise_or_ad(text):
         "funeral",
         "cemetery",
         "advertise",
+        "advertisement",
         "parishioner certificate",
         "pope s intentions",
         "gospel meditation",
@@ -578,6 +650,8 @@ def _is_noise_or_ad(text):
         "second collection",
         "parish clergy",
         "rectory office hours",
+        "office hours",
+        "gift shop",
         "staff",
         "phone",
         "email",
@@ -586,18 +660,27 @@ def _is_noise_or_ad(text):
     ]
 
     if any(p in low for p in noise_phrases):
-        return True
+        # Allow legitimate event lines that say contact/register, but reject pure staff/contact blocks.
+        if not any(k in low for k in ["register", "registration", "call to register", "workshop", "retreat", "meeting"]):
+            return True
 
     # Reject mostly contact / address / ad lines.
     if re.search(r"\b\d{3}[-.]\d{3}[-.]\d{4}\b", text) and not any(k in low for k in ["call to register", "for information", "contact"]):
         if not any(k in low for k in ["workshop", "retreat", "study", "meeting", "adoration", "confession", "mass schedule"]):
             return True
 
-    if len(text) > 260 and not any(k in low for k in ["where", "when", "time", "join us", "meets", "schedule"]):
+    # Reject impossible/broken time lines even if not caught above.
+    broken_time = re.search(r"\b(\d{2,})[:](\d{2,})\s*(?:am|pm)?\b", text, flags=re.I)
+    if broken_time:
+        hour = int(broken_time.group(1))
+        minute = int(broken_time.group(2))
+        if hour > 12 or minute > 59:
+            return True
+
+    if len(text) > 260 and not any(k in low for k in ["where", "when", "time", "join us", "meets", "schedule", "workshop"]):
         return True
 
     return False
-
 
 def _is_mass_intention_context(context):
     low = normalize(context)
@@ -807,43 +890,65 @@ def extract_recurring_sacrament_events(text, parish, source_file):
     return list(unique.values())
 
 
+def _has_event_anchor(text):
+    """Require event-style language, not just a Catholic keyword."""
+    low = normalize(text)
+    anchors = [
+        "where", "when", "time", "date", "join us", "you are invited",
+        "meets", "meeting", "will be held", "will take place", "takes place",
+        "register", "registration", "call to register", "contact", "rsvp",
+        "workshop", "retreat", "bible study", "faith formation", "oica", "rcia",
+        "luncheon", "gathering", "festival", "speaker", "revival", "prayer group",
+        "adoration", "novena", "rosary", "may crowning", "food pantry",
+        "knights of columbus", "columbiettes", "legion of mary", "carmelite"
+    ]
+    return any(anchor in low for anchor in anchors)
+
+
 def _event_quality_score(line, context):
     """
     Scores whether a line is a real event listing rather than an article/ad/random sentence.
-    A line must have enough structure: title + time/date/meeting words, and must avoid noise.
+    This version is stricter: it rejects OCR garbage and requires event structure,
+    not just the word Mass/confession/volunteer.
     """
+    line = clean_text(line)
+    context = clean_text(context)
     combined = clean_text(line + " " + context)
     low = normalize(combined)
 
-    if _is_noise_or_ad(combined) or _is_mass_intention_context(combined):
+    if _is_noise_or_ad(line) or _is_noise_or_ad(combined) or _is_mass_intention_context(combined):
+        return 0
+
+    # The title line itself must not be junk, a contact block, or just a stray time/name row.
+    if _looks_like_ocr_garbage(line) or _looks_like_mass_intention_table_line(line):
         return 0
 
     score = 0
 
-    # Strong event structure.
-    if re.search(r"(?i)\b(where|when|time|date|join us|meets?|meeting|register|registration|call to register|contact)\b", combined):
+    has_date = bool(find_date_near_line(line, context))
+    has_time = bool(find_time_near_line(line, context))
+    has_anchor = _has_event_anchor(combined)
+
+    # Real events usually have an anchor plus date/time/recurrence.
+    if has_anchor:
+        score += 4
+    if has_date:
+        score += 3
+    if has_time:
         score += 3
 
-    if find_date_near_line(line, context):
-        score += 3
-
-    if find_time_near_line(line, context):
-        score += 3
-
-    # Good event category words.
     category_words = [
         "workshop", "retreat", "bible study", "faith formation", "oica", "rcia",
         "youth", "young adult", "luncheon", "gathering", "festival", "speaker",
-        "meeting", "ministry", "volunteer", "food pantry", "outreach",
-        "knights of columbus", "columbiettes", "legion of mary",
-        "carmelite", "may crowning", "revival", "adoration",
-        "rosary", "novena", "prayer group", "marriage", "couples", "parejas"
+        "meeting", "food pantry", "outreach", "knights of columbus",
+        "columbiettes", "legion of mary", "carmelite", "may crowning",
+        "revival", "adoration", "rosary", "novena", "prayer group",
+        "marriage", "couples", "parejas"
     ]
 
     if any(word in low for word in category_words):
         score += 3
 
-    # Recurrence clues.
     recurrence_words = [
         "every", "weekly", "monthly", "second monday", "second wednesday",
         "third friday", "last monday", "each month", "todos", "cada",
@@ -853,13 +958,16 @@ def _event_quality_score(line, context):
     if any(word in low for word in recurrence_words):
         score += 2
 
-    # Avoid vague theology/article sentences.
+    # Require either an event anchor OR both date and time.
+    # This blocks random table rows with volunteer/staff names.
+    if not has_anchor and not (has_date and has_time):
+        return 0
+
     article_words = ["gospel", "reading", "meditation", "pope", "scripture", "reflection", "homily"]
     if any(word in low for word in article_words) and not any(word in low for word in ["join", "meets", "workshop", "study", "prayer group"]):
-        score -= 4
+        score -= 5
 
     return score
-
 
 def _make_title_from_event_context(line, context):
     """
@@ -908,9 +1016,18 @@ def extract_general_bulletin_events(text, parish, source_file):
             continue
 
         title = _make_title_from_event_context(line, context)
+
+        # Final title/description safety check: do not display OCR junk as an event card.
+        if _is_noise_or_ad(title) or _looks_like_ocr_garbage(title) or _looks_like_mass_intention_table_line(title):
+            continue
+
         date_label = find_date_near_line(line, context) or _day_label_from_context(line + " " + context, "See bulletin")
         time_label = find_time_near_line(line, context) or "See bulletin"
         description = clean_text(" ".join([line] + next_lines[:3]))
+
+        if _is_noise_or_ad(description) or _looks_like_ocr_garbage(description):
+            continue
+
         category = infer_category(title, description)
 
         _add_event(
