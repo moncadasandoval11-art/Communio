@@ -288,25 +288,88 @@ def normalize(text):
     return text.strip()
 
 
-def infer_parish_from_filename(filename):
-    name = normalize(filename)
 
-    best_match = ""
+# ============================================================
+# PDF PARISH IDENTIFICATION + BETTER EVENT EXTRACTION
+# ============================================================
+
+def _norm_for_score(text):
+    text = normalize(text)
+    replacements = {
+        "st ": "saint ",
+        "ste ": "saint ",
+        "cathedral of st ": "cathedral of saint ",
+    }
+    for old, new in replacements.items():
+        text = text.replace(old, new)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def infer_parish_from_filename(filename):
+    """Fallback parish detector using the PDF file name."""
+    name = _norm_for_score(filename.replace("_", " ").replace("-", " "))
+
+    best_match = "Unknown Parish"
     best_score = 0
 
     for parish in parish_df["parish"]:
-        parish_norm = normalize(parish)
-        words = parish_norm.split()
+        parish_norm = _norm_for_score(parish)
+        words = [w for w in parish_norm.split() if len(w) > 2 and w not in {"the", "of", "and", "mission", "parish", "church", "catholic"}]
         score = sum(1 for word in words if word in name)
+
+        if parish_norm in name:
+            score += 10
 
         if score > best_score:
             best_score = score
             best_match = parish
 
-    if best_score >= 2:
-        return best_match
+    return best_match if best_score >= 2 else "Unknown Parish"
 
-    return "Unknown Parish"
+
+def identify_parish_for_pdf(filename, text):
+    """
+    Identify which parish a bulletin belongs to BEFORE extracting events.
+    Uses filename first, then the first pages of PDF text.
+    """
+    filename_guess = infer_parish_from_filename(filename)
+    if filename_guess != "Unknown Parish":
+        return filename_guess
+
+    sample = _norm_for_score((filename + " " + text[:5000]).replace("\n", " "))
+
+    best_match = "Unknown Parish"
+    best_score = 0
+
+    for _, row in parish_df.iterrows():
+        parish = row["parish"]
+        city = row.get("city", "")
+        parish_norm = _norm_for_score(parish)
+        city_norm = _norm_for_score(city)
+
+        score = 0
+        if parish_norm and parish_norm in sample:
+            score += 20
+
+        words = [w for w in parish_norm.split() if len(w) > 2 and w not in {"the", "of", "and", "mission", "parish", "church", "catholic"}]
+        score += sum(3 for word in words if word in sample)
+
+        if city_norm and city_norm in sample:
+            score += 2
+
+        # Common bulletin abbreviations
+        if parish == "Holy Name of Jesus" and ("holy name" in sample or "hnj" in sample or "myhnj" in sample):
+            score += 25
+        if parish == "Basilica of Saint Edward" and ("basilica of saint edward" in sample or "basilicaofsaintedward" in sample or "st edward" in sample):
+            score += 25
+        if parish == "Saint Thomas More" and ("st thomas more" in sample or "saint thomas more" in sample or "stmbb" in sample):
+            score += 25
+
+        if score > best_score:
+            best_score = score
+            best_match = parish
+
+    return best_match if best_score >= 5 else "Unknown Parish"
 
 
 def infer_category(title, description=""):
@@ -314,58 +377,46 @@ def infer_category(title, description=""):
 
     if any(w in text for w in ["mass", "eucharist", "first communion", "communion", "vigil", "liturgy"]):
         return "Liturgy / Mass"
-
-    if any(w in text for w in ["confession", "rosary", "novena", "prayer", "stations", "divine mercy"]):
+    if any(w in text for w in ["confession", "reconciliation", "penance", "rosary", "novena", "prayer", "stations", "divine mercy"]):
         return "Confession / Prayer"
-
-    if "adoration" in text or "blessed sacrament" in text:
+    if "adoration" in text or "blessed sacrament" in text or "exposition" in text:
         return "Adoration"
-
     if "retreat" in text:
         return "Retreat"
-
     if any(w in text for w in ["youth", "young adult", "world youth day", "teen"]):
         return "Youth / Young Adult"
-
     if any(w in text for w in ["marriage", "couple", "pareja", "family", "families", "matrimonial"]):
         return "Marriage / Family"
-
     if any(w in text for w in ["school", "academy", "open house"]):
         return "School / Open House"
-
     if any(w in text for w in ["pantry", "food", "charity", "donation", "outreach", "homeless", "drive", "service"]):
         return "Service / Charity"
-
     if any(w in text for w in ["bible study", "faith formation", "study", "formation", "catechism", "oica", "rcia", "speaker", "workshop"]):
         return "Adult Formation"
-
     if any(w in text for w in ["social", "fellowship", "luncheon", "gathering", "festival", "guild", "coffee"]):
         return "Social / Fellowship"
-
     if any(w in text for w in ["easter", "christmas", "advent", "lent", "holy day", "pentecost"]):
         return "Holiday / Holy Day"
-
     if any(w in text for w in ["minister", "volunteer", "lector", "usher", "ministry"]):
         return "Ministry / Volunteer"
-
     if any(w in text for w in ["fundraiser", "sale", "raffle", "treasures"]):
         return "Fundraiser"
-
     return "Other"
 
 
 def extract_text_from_pdf(pdf_path):
     text = ""
-
     try:
         with pdfplumber.open(pdf_path) as pdf:
             for page in pdf.pages:
-                page_text = page.extract_text()
-                if page_text:
-                    text += "\n" + page_text
+                try:
+                    page_text = page.extract_text(x_tolerance=1, y_tolerance=3)
+                    if page_text:
+                        text += "\n" + page_text
+                except Exception:
+                    continue
     except Exception as e:
         st.warning(f"Could not read {pdf_path}: {e}")
-
     return text
 
 
@@ -377,63 +428,53 @@ def find_date_near_line(line, context):
         r"[A-Z][a-z]+\s+\d{1,2}(st|nd|rd|th)?",
         r"\d{1,2}/\d{1,2}/\d{2,4}",
     ]
-
     combined = line + " " + context
-
     for pattern in date_patterns:
         match = re.search(pattern, combined)
         if match:
             return clean_text(match.group(0))
-
     return ""
 
 
 def find_time_near_line(line, context):
     time_patterns = [
-        r"\d{1,2}:\d{2}\s*(am|pm|AM|PM)\s*[-–]\s*\d{1,2}:\d{2}\s*(am|pm|AM|PM)",
-        r"\d{1,2}\s*(am|pm|AM|PM)\s*[-–]\s*\d{1,2}\s*(am|pm|AM|PM)",
-        r"\d{1,2}:\d{2}\s*(am|pm|AM|PM)",
-        r"\d{1,2}\s*(am|pm|AM|PM)",
+        r"\d{1,2}:\d{2}\s*(?:am|pm|AM|PM)\s*[-–]\s*\d{1,2}:\d{2}\s*(?:am|pm|AM|PM)",
+        r"\d{1,2}\s*(?:am|pm|AM|PM)\s*[-–]\s*\d{1,2}\s*(?:am|pm|AM|PM)",
+        r"\d{1,2}:\d{2}\s*(?:am|pm|AM|PM)",
+        r"\d{1,2}\s*(?:am|pm|AM|PM)",
+        r"12\s*(?:noon|Noon|NOON)",
     ]
-
     combined = line + " " + context
-
     for pattern in time_patterns:
         match = re.search(pattern, combined)
         if match:
             return clean_text(match.group(0))
-
     return ""
 
 
 def looks_like_event_line(line):
     text = normalize(line)
-
     event_keywords = [
         "workshop", "gathering", "study", "bible", "rosary", "novena",
         "adoration", "revival", "retreat", "youth", "world youth day",
         "luncheon", "meeting", "guild", "ministry", "volunteer",
-        "first communion", "confirmation", "mass", "confession",
+        "first communion", "confirmation", "mass", "confession", "reconciliation",
         "prayer", "festival", "fundraiser", "sale", "speaker",
         "formation", "oica", "rcia", "carmelite", "knights of columbus",
         "columbiettes", "legion of mary", "parents", "pareja",
-        "marriage", "food pantry", "outreach"
+        "marriage", "food pantry", "outreach", "baptism", "baptismal"
     ]
-
     has_keyword = any(keyword in text for keyword in event_keywords)
-    has_time = bool(re.search(r"\d{1,2}(:\d{2})?\s*(am|pm)", text))
+    has_time = bool(re.search(r"\d{1,2}(:\d{2})?\s*(am|pm)", text)) or "noon" in text
     has_date_word = any(day in text for day in [
         "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday",
         "may", "june", "july", "august", "september", "october", "november", "december",
         "january", "february", "march", "april"
     ])
-
     if has_keyword and (has_time or has_date_word):
         return True
-
-    if has_keyword and len(line) < 140:
+    if has_keyword and len(line) < 160:
         return True
-
     return False
 
 
@@ -442,93 +483,112 @@ def make_event_id(parish, title, date_label, time_label):
     return hashlib.md5(raw.encode()).hexdigest()
 
 
-def extract_mass_events(text, parish, source_file):
+def _normalize_pdf_schedule_text(text):
+    """Makes PDF text easier to regex: fixes missing spaces like 8:00AM and 12Noon."""
+    text = text.replace("\u2014", "-").replace("\u2013", "-")
+    text = re.sub(r"(?i)(\d{1,2}:\d{2})(am|pm)", r"\1 \2", text)
+    text = re.sub(r"(?i)(\d{1,2})(am|pm)", r"\1 \2", text)
+    text = re.sub(r"(?i)(\d{1,2})(noon)", r"\1 Noon", text)
+    text = re.sub(r"(?i)&\s*12\s*Noon", ", 12:00 PM", text)
+    text = re.sub(r"(?i)12\s*Noon", "12:00 PM", text)
+    return text
+
+
+def _extract_times(text):
+    text = _normalize_pdf_schedule_text(text)
+    raw_times = re.findall(r"(?i)\b\d{1,2}:\d{2}\s*(?:am|pm)\b|\b\d{1,2}\s*(?:am|pm)\b", text)
+    cleaned = []
+    for t in raw_times:
+        t = clean_text(t).upper().replace(" ", "")
+        t = t.replace("AM", " AM").replace("PM", " PM")
+        if ":" not in t:
+            t = t.replace(" AM", ":00 AM").replace(" PM", ":00 PM")
+        if t not in cleaned:
+            cleaned.append(t)
+    return cleaned
+
+
+def _add_event(events, parish, source_file, title, date_label, time_label, category, description):
+    event = {
+        "id": make_event_id(parish, title, date_label, time_label),
+        "title": title,
+        "date_label": date_label,
+        "time": time_label,
+        "parish": parish,
+        "category": category,
+        "description": description,
+        "source_file": source_file,
+    }
+    events.append(event)
+
+
+def extract_recurring_sacrament_events(text, parish, source_file):
+    """Extract recurring Mass, confession, adoration, rosary, and basic sacrament schedules."""
     events = []
+    text = _normalize_pdf_schedule_text(text)
     lines = [clean_text(l) for l in text.splitlines() if clean_text(l)]
 
-    for line in lines:
-        l = line.lower()
+    for i, line in enumerate(lines):
+        context = " ".join(lines[max(0, i-1): min(len(lines), i+4)])
+        line_context = _normalize_pdf_schedule_text(line + " " + context)
+        low = line_context.lower()
 
-        # DAILY MASS
-        if "daily mass" in l or "monday through friday" in l or "mon - fri" in l:
-            matches = re.findall(r"\d{1,2}:\d{2}\s*(?:am|pm)", l)
+        # Daily/weekday Mass patterns
+        if any(k in low for k in ["daily mass", "monday through friday", "mon - fri", "mon-fri", "monday-friday"]):
+            for time_str in _extract_times(line_context):
+                _add_event(events, parish, source_file, "Daily Mass", "Monday-Friday", time_str, "Liturgy / Mass", "Recurring weekday Mass listed in bulletin schedule.")
 
-            for time_str in matches:
-                events.append({
-                    "id": make_event_id(parish, f"Daily Mass {time_str}", "Weekdays", time_str),
-                    "title": "Daily Mass",
-                    "date_label": "Monday–Friday",
-                    "time": time_str,
-                    "parish": parish,
-                    "category": "Liturgy / Mass",
-                    "description": "Weekday Mass",
-                    "source_file": source_file,
-                })
+        # Saturday morning Mass
+        if "saturday" in low and "mass" in low and "vigil" not in low:
+            for time_str in _extract_times(line_context):
+                _add_event(events, parish, source_file, "Saturday Mass", "Saturday", time_str, "Liturgy / Mass", "Saturday Mass listed in bulletin schedule.")
 
-        # SATURDAY VIGIL
-        if "vigil" in l:
-            matches = re.findall(r"\d{1,2}:\d{2}\s*(?:am|pm)", l)
+        # Saturday Vigil Mass
+        if "vigil" in low and ("mass" in low or "saturday" in low):
+            for time_str in _extract_times(line_context):
+                _add_event(events, parish, source_file, "Saturday Vigil Mass", "Saturday", time_str, "Liturgy / Mass", "Sunday Vigil Mass listed in bulletin schedule.")
 
-            for time_str in matches:
-                events.append({
-                    "id": make_event_id(parish, f"Vigil Mass {time_str}", "Saturday", time_str),
-                    "title": "Saturday Vigil Mass",
-                    "date_label": "Saturday",
-                    "time": time_str,
-                    "parish": parish,
-                    "category": "Liturgy / Mass",
-                    "description": "Sunday Vigil Mass",
-                    "source_file": source_file,
-                })
+        # Sunday Masses
+        if "sunday" in low and "mass" in low:
+            for time_str in _extract_times(line_context):
+                _add_event(events, parish, source_file, "Sunday Mass", "Sunday", time_str, "Liturgy / Mass", "Recurring Sunday Mass listed in bulletin schedule.")
 
-        # SUNDAY MASSES
-        if "sunday" in l and "mass" in l:
-            matches = re.findall(r"\d{1,2}:\d{2}\s*(?:am|pm)", l)
+        # Spanish / bilingual Mass labels
+        if ("spanish mass" in low or "misa" in low or "bilingual" in low) and "mass" in low:
+            label = "Spanish/Bilingual Mass" if "bilingual" in low else "Spanish Mass"
+            day = "Sunday" if "sunday" in low or "domingo" in low else "See bulletin"
+            for time_str in _extract_times(line_context):
+                _add_event(events, parish, source_file, label, day, time_str, "Liturgy / Mass", "Language-specific Mass listed in bulletin schedule.")
 
-            for time_str in matches:
-                events.append({
-                    "id": make_event_id(parish, f"Sunday Mass {time_str}", "Sunday", time_str),
-                    "title": "Sunday Mass",
-                    "date_label": "Sunday",
-                    "time": time_str,
-                    "parish": parish,
-                    "category": "Liturgy / Mass",
-                    "description": "Sunday Mass",
-                    "source_file": source_file,
-                })
+        # Confession / Reconciliation
+        if any(k in low for k in ["confession", "confessions", "reconciliation", "penance"]):
+            day = "Saturday" if "saturday" in low or "sabado" in low else "Weekly"
+            for time_str in _extract_times(line_context):
+                _add_event(events, parish, source_file, "Confession", day, time_str, "Confession / Prayer", "Sacrament of Reconciliation listed in bulletin schedule.")
 
-        # CONFESSION
-        if "confession" in l:
-            matches = re.findall(r"\d{1,2}:\d{2}\s*(?:am|pm)", l)
+        # Adoration
+        if "adoration" in low or "blessed sacrament" in low or "exposition" in low:
+            date_label = "Monday-Friday" if "monday" in low and "friday" in low else "See bulletin"
+            times = _extract_times(line_context)
+            if times:
+                time_label = " - ".join(times[:2]) if len(times) >= 2 else times[0]
+            else:
+                time_label = "See bulletin"
+            _add_event(events, parish, source_file, "Eucharistic Adoration", date_label, time_label, "Adoration", "Recurring Eucharistic adoration listed in bulletin schedule.")
 
-            for time_str in matches:
-                events.append({
-                    "id": make_event_id(parish, f"Confession {time_str}", "Weekly", time_str),
-                    "title": "Confession",
-                    "date_label": "Weekly",
-                    "time": time_str,
-                    "parish": parish,
-                    "category": "Confession / Prayer",
-                    "description": "Sacrament of Reconciliation",
-                    "source_file": source_file,
-                })
+        # Rosary / novenas
+        if "rosary" in low or "rosario" in low or "novena" in low:
+            times = _extract_times(line_context)
+            time_label = times[0] if times else "See bulletin"
+            title = "Rosary" if "rosary" in low or "rosario" in low else "Novena"
+            _add_event(events, parish, source_file, title, "See bulletin", time_label, "Confession / Prayer", line_context[:250])
 
     return events
 
 
-def extract_events_from_text(text, parish, source_file):
-    events = []
-
-    # ==========================================
-    # 1. MASS EVENTS (NEW — THIS FIXES YOUR ISSUE)
-    # ==========================================
-    mass_events = extract_mass_events(text, parish, source_file)
-    events.extend(mass_events)
-
-    # ==========================================
-    # 2. YOUR ORIGINAL EVENT EXTRACTION (UNCHANGED LOGIC)
-    # ==========================================
+def extract_general_bulletin_events(text, parish, source_file):
     lines = [clean_text(line) for line in text.splitlines() if clean_text(line)]
+    events = []
 
     for i, line in enumerate(lines):
         if not looks_like_event_line(line):
@@ -537,31 +597,36 @@ def extract_events_from_text(text, parish, source_file):
         previous_line = lines[i - 1] if i > 0 else ""
         next_line = lines[i + 1] if i + 1 < len(lines) else ""
         second_next_line = lines[i + 2] if i + 2 < len(lines) else ""
-
         context = " ".join([previous_line, next_line, second_next_line])
 
-        title = line[:110]
-
+        title = line[:110] + ("..." if len(line) > 110 else "")
         date_label = find_date_near_line(line, context)
         time_label = find_time_near_line(line, context)
-
-        description = clean_text(context)
+        description = clean_text(" ".join([line, next_line, second_next_line]))
         category = infer_category(title, description)
 
-        events.append({
-            "id": make_event_id(parish, title, date_label, time_label),
-            "title": title,
-            "date_label": date_label if date_label else "See bulletin",
-            "time": time_label if time_label else "See bulletin",
-            "parish": parish,
-            "category": category,
-            "description": description,
-            "source_file": source_file,
-        })
+        _add_event(
+            events,
+            parish,
+            source_file,
+            title,
+            date_label if date_label else "See bulletin",
+            time_label if time_label else "See bulletin",
+            category,
+            description,
+        )
 
-    # REMOVE DUPLICATES
-    unique = {e["id"]: e for e in events}
+    return events
 
+
+def extract_events_from_text(text, parish, source_file):
+    events = []
+    events.extend(extract_recurring_sacrament_events(text, parish, source_file))
+    events.extend(extract_general_bulletin_events(text, parish, source_file))
+
+    unique = {}
+    for event in events:
+        unique[event["id"]] = event
     return list(unique.values())
 
 
@@ -583,8 +648,8 @@ def load_events_from_bulletins():
 
     for file in pdf_files:
         pdf_path = os.path.join(BULLETIN_FOLDER, file)
-        parish = infer_parish_from_filename(file)
         text = extract_text_from_pdf(pdf_path)
+        parish = identify_parish_for_pdf(file, text)
         events = extract_events_from_text(text, parish, file)
         all_events.extend(events)
 
@@ -595,8 +660,6 @@ def load_events_from_bulletins():
         ])
 
     return pd.DataFrame(all_events)
-
-
 # ============================================================
 # OPTIONAL SEED EVENTS
 # These make the app look populated even before you upload PDFs.
@@ -751,13 +814,17 @@ else:
 
 
 # ============================================================
-# FIND AN EVENT GUI (FIXED VISIBILITY + FILTER LOGIC)
+# ============================================================
+# FIND AN EVENT GUI
 # ============================================================
 
 st.markdown("""
-<h2 style="color:#073b4c; margin-top:30px;">
+<h2 style="color:#073b4c; margin-top:30px; margin-bottom:0.35rem; font-weight:900;">
 Find an Event
 </h2>
+<p style="color:#3f6473; margin-top:0;">
+Search parish bulletins by parish, event type, Mass, confession, adoration, and other parish life events.
+</p>
 """, unsafe_allow_html=True)
 
 filter_col1, filter_col2, filter_col3 = st.columns([1, 1, 1.4])
@@ -769,7 +836,8 @@ with filter_col1:
     )
 
 with filter_col2:
-    parish_options = ["All"] + sorted(events_df["parish"].dropna().unique().tolist())
+    # IMPORTANT: always show ALL 54 parishes, not just parishes with matched events
+    parish_options = ["All"] + parish_df["parish"].dropna().tolist()
     selected_parish = st.selectbox(
         "Parish",
         parish_options
@@ -778,55 +846,49 @@ with filter_col2:
 with filter_col3:
     search_query = st.text_input(
         "Search by keyword",
-        placeholder="Try: mass, confession, rosary..."
+        placeholder="Try: mass, confession, adoration, rosary, youth..."
     )
 
 
-# ============================================================
-# 🔥 IMPROVED FILTERING (THIS FIXES YOUR ISSUE)
-# ============================================================
-
 filtered_df = events_df.copy()
 
-# CATEGORY FILTER (more flexible for Mass)
-if selected_category != "All":
+if selected_category != "All" and not filtered_df.empty:
     filtered_df = filtered_df[
-        filtered_df["category"].str.contains(selected_category, case=False, na=False)
+        filtered_df["category"].astype(str).str.contains(selected_category, case=False, na=False)
     ]
 
-# PARISH FILTER (fixes mismatch issues)
-if selected_parish != "All":
+if selected_parish != "All" and not filtered_df.empty:
     filtered_df = filtered_df[
-        filtered_df["parish"].str.contains(selected_parish, case=False, na=False)
+        filtered_df["parish"].astype(str).str.contains(selected_parish, case=False, na=False)
     ]
 
-# SEARCH FILTER (THIS IS KEY FOR MASS/CONFESSION)
-if search_query.strip():
+if search_query.strip() and not filtered_df.empty:
     q = search_query.lower().strip()
 
     filtered_df = filtered_df[
         filtered_df.apply(
-            lambda row: any(
-                q in str(row.get(col, "")).lower()
-                for col in ["title", "description", "parish", "category"]
-            ),
+            lambda row: q in " ".join([
+                str(row.get("title", "")),
+                str(row.get("description", "")),
+                str(row.get("parish", "")),
+                str(row.get("category", "")),
+                str(row.get("date_label", "")),
+                str(row.get("time", "")),
+                str(row.get("source_file", "")),
+            ]).lower(),
             axis=1
         )
     ]
 
 
-# ============================================================
-# DISPLAY RESULTS
-# ============================================================
-
 st.markdown(f"""
-<h4 style="color:#075763;">
+<h4 style="color:#075763; margin-top:1rem;">
 {len(filtered_df)} event(s) found
 </h4>
 """, unsafe_allow_html=True)
 
 if filtered_df.empty:
-    st.warning("No events matched your filters.")
+    st.warning("No events matched your filters. If you just uploaded PDFs, reboot/redeploy Streamlit so the cached bulletin scan refreshes.")
 else:
     for _, row in filtered_df.iterrows():
         st.markdown(f"""
@@ -840,8 +902,6 @@ else:
         </div>
         """, unsafe_allow_html=True)
 
-
-# ============================================================
 # PDF STATUS / ADMIN INFO
 # ============================================================
 
