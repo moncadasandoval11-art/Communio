@@ -1412,13 +1412,18 @@ else:
     featured = featured_events.iloc[featured_index]
 
     st.markdown(f"""
-    <div class="slide-box">
-        <div class="slide-title">{featured['title']}</div>
-        <p>{featured['date_label']} • {featured['time']}</p>
-        <p>{featured['parish']} · {featured['category']}</p>
-        <p>{featured['description']}</p>
-    </div>
-    """, unsafe_allow_html=True)
+<div class="slide-box">
+    <div class="slide-title">{featured['title']}</div>
+    <p>{featured['date_label']} • {featured['time']}</p>
+    <p>{featured['parish']} · {featured['category']}</p>
+    <p>{featured['description']}</p>
+</div>
+""", unsafe_allow_html=True)
+
+# 🔥 NEW: clickable button for detail page
+if st.button("View details", key=f"featured_{featured['id']}"):
+    st.query_params["event"] = str(featured["id"])
+    st.rerun()
 
 
 # ============================================================
