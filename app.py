@@ -449,6 +449,35 @@ def normalize(text):
 # PDF PARISH IDENTIFICATION + BETTER EVENT EXTRACTION
 # ============================================================
 
+
+
+def clean_ocr_text(text):
+    """
+    Clean the worst PDF/OCR artifacts before the event extractor sees them.
+    Removes DiscoverMass character codes, broken duplicated time strings,
+    and repeated-letter artifacts such as Apprriill or TThhuurrss.
+    """
+    if not text:
+        return ""
+
+    text = str(text)
+    text = re.sub(r"\(cid:\d+\)", " ", text, flags=re.I)
+    text = re.sub(r"(?i)\baamm\b", "am", text)
+    text = re.sub(r"(?i)\bppmm\b", "pm", text)
+    text = re.sub(r"\b(\d)\1::(\d{2})\2\b", r"\1:\2", text)
+    text = re.sub(r"\b(\d{2})::(\d{2})\b", r"\1:\2", text)
+
+    def dedupe_noisy_word(match):
+        word = match.group(0)
+        repeated_pairs = re.findall(r"([A-Za-z])\1", word)
+        if len(repeated_pairs) >= 2:
+            return re.sub(r"([A-Za-z])\1", r"\1", word)
+        return word
+
+    text = re.sub(r"\b[A-Za-z]{4,}\b", dedupe_noisy_word, text)
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
 def _norm_for_score(text):
     text = normalize(text)
     replacements = {
@@ -573,7 +602,7 @@ def extract_text_from_pdf(pdf_path):
                     continue
     except Exception as e:
         st.warning(f"Could not read {pdf_path}: {e}")
-    return text
+    return clean_ocr_text(text)
 
 
 def find_date_near_line(line, context):
@@ -623,7 +652,7 @@ def _normalize_pdf_schedule_text(text):
     Clean PDF text without changing the website layout.
     This helps with bulletin text like 8:00AM, 12Noon, SaturdayEveningVigilMass, etc.
     """
-    text = text or ""
+    text = clean_ocr_text(text or "")
     text = text.replace("\u2014", "-").replace("\u2013", "-").replace("\u00a0", " ")
     text = re.sub(r"(?i)(\d{1,2}:\d{2})(am|pm)", r"\1 \2", text)
     text = re.sub(r"(?i)(\d{1,2})(am|pm)", r"\1 \2", text)
@@ -708,10 +737,15 @@ def _has_pdf_artifact_text_basic(text):
     low = normalize(raw)
     if not raw:
         return True
+
     if re.search(r"\(cid:\d+\)", raw, flags=re.I) or raw.count("(cid:") >= 1:
         return True
+
     if "::" in raw or re.search(r"(?i)\b(?:aamm|ppmm)\b", raw):
         return True
+    if re.search(r"\b\d{2,}:\d{3,}\b", raw):
+        return True
+
     artifact_phrases = [
         "view this bulletin online",
         "discovermass com",
@@ -719,10 +753,17 @@ def _has_pdf_artifact_text_basic(text):
         "lekti pou semen lan",
         "readings for the week",
         "scripture readings",
+        "staff and volunteers",
+        "st ann place staff",
     ]
-    return any(p in low for p in artifact_phrases)
+    if any(p in low for p in artifact_phrases):
+        return True
 
+    doubled_words = re.findall(r"\b(?:[a-z]*([a-z])\1[a-z]*){2,}\b", raw, flags=re.I)
+    if len(doubled_words) >= 2:
+        return True
 
+    return False
 
 def _is_noise_or_ad(text):
     """
@@ -761,6 +802,8 @@ def _is_noise_or_ad(text):
         "parish clergy",
         "rectory office hours",
         "staff",
+        "staff and volunteers",
+        "st ann place staff",
         "phone",
         "email",
         "website",
@@ -862,7 +905,32 @@ def _is_bad_extracted_event(event):
     if any(bt in title_low for bt in bad_titles):
         return True
 
+    if not _is_real_event_candidate_text(title, description, date_label, time_label):
+        return True
+
     return False
+
+
+def _is_real_event_candidate_text(title, description, date_label, time_label):
+    """
+    Last-pass check for OCR junk and non-event fragments before display.
+    """
+    combined = clean_text(" ".join([title, description, date_label, time_label]))
+    low = normalize(combined)
+
+    if _has_pdf_artifact_text_basic(combined) or _has_pdf_artifact_text(combined):
+        return False
+
+    if "staff and volunteers" in low or "st ann place staff" in low:
+        return False
+
+    has_real_time = bool(re.search(r"(?i)\b\d{1,2}:\d{2}\s*(?:am|pm)\b|\b\d{1,2}\s*(?:am|pm)\b", combined))
+    has_real_day_or_date = bool(re.search(r"(?i)\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday|every|weekly|monthly|january|february|march|april|may|june|july|august|september|october|november|december)\b", combined))
+
+    if date_label == "See bulletin" and time_label == "See bulletin" and not (has_real_time or has_real_day_or_date):
+        return False
+
+    return True
 
 
 def _is_mass_intention_context(context):
@@ -1156,7 +1224,7 @@ def extract_general_bulletin_events(text, parish, source_file):
     events = []
 
     for i, line in enumerate(lines):
-        if _is_noise_or_ad(line):
+        if _is_noise_or_ad(line) or _has_pdf_artifact_text_basic(line):
             continue
 
         previous_lines = lines[max(0, i - 3):i]
@@ -1373,6 +1441,9 @@ events_df = pd.concat([seed_events, pdf_events], ignore_index=True)
 
 if not events_df.empty:
     events_df = events_df.drop_duplicates(subset=["id"])
+    events_df = events_df[
+        ~events_df.apply(lambda row: _is_bad_extracted_event(row.to_dict()), axis=1)
+    ].reset_index(drop=True)
 
 
 # ============================================================
@@ -1420,10 +1491,10 @@ else:
 </div>
 """, unsafe_allow_html=True)
 
-# 🔥 NEW: clickable button for detail page
-if st.button("View details", key=f"featured_{featured['id']}"):
-    st.query_params["event"] = str(featured["id"])
-    st.rerun()
+    # Clickable button for detail page
+    if st.button("View details", key=f"featured_{featured['id']}"):
+        st.query_params["event"] = str(featured["id"])
+        st.rerun()
 
 
 # ============================================================
