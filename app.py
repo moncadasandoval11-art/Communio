@@ -442,10 +442,93 @@ def make_event_id(parish, title, date_label, time_label):
     return hashlib.md5(raw.encode()).hexdigest()
 
 
-def extract_events_from_text(text, parish, source_file):
-    lines = [clean_text(line) for line in text.splitlines() if clean_text(line)]
-
+def extract_mass_events(text, parish, source_file):
     events = []
+    lines = [clean_text(l) for l in text.splitlines() if clean_text(l)]
+
+    for line in lines:
+        l = line.lower()
+
+        # DAILY MASS
+        if "daily mass" in l or "monday through friday" in l or "mon - fri" in l:
+            matches = re.findall(r"\d{1,2}:\d{2}\s*(?:am|pm)", l)
+
+            for time_str in matches:
+                events.append({
+                    "id": make_event_id(parish, f"Daily Mass {time_str}", "Weekdays", time_str),
+                    "title": "Daily Mass",
+                    "date_label": "Monday–Friday",
+                    "time": time_str,
+                    "parish": parish,
+                    "category": "Liturgy / Mass",
+                    "description": "Weekday Mass",
+                    "source_file": source_file,
+                })
+
+        # SATURDAY VIGIL
+        if "vigil" in l:
+            matches = re.findall(r"\d{1,2}:\d{2}\s*(?:am|pm)", l)
+
+            for time_str in matches:
+                events.append({
+                    "id": make_event_id(parish, f"Vigil Mass {time_str}", "Saturday", time_str),
+                    "title": "Saturday Vigil Mass",
+                    "date_label": "Saturday",
+                    "time": time_str,
+                    "parish": parish,
+                    "category": "Liturgy / Mass",
+                    "description": "Sunday Vigil Mass",
+                    "source_file": source_file,
+                })
+
+        # SUNDAY MASSES
+        if "sunday" in l and "mass" in l:
+            matches = re.findall(r"\d{1,2}:\d{2}\s*(?:am|pm)", l)
+
+            for time_str in matches:
+                events.append({
+                    "id": make_event_id(parish, f"Sunday Mass {time_str}", "Sunday", time_str),
+                    "title": "Sunday Mass",
+                    "date_label": "Sunday",
+                    "time": time_str,
+                    "parish": parish,
+                    "category": "Liturgy / Mass",
+                    "description": "Sunday Mass",
+                    "source_file": source_file,
+                })
+
+        # CONFESSION
+        if "confession" in l:
+            matches = re.findall(r"\d{1,2}:\d{2}\s*(?:am|pm)", l)
+
+            for time_str in matches:
+                events.append({
+                    "id": make_event_id(parish, f"Confession {time_str}", "Weekly", time_str),
+                    "title": "Confession",
+                    "date_label": "Weekly",
+                    "time": time_str,
+                    "parish": parish,
+                    "category": "Confession / Prayer",
+                    "description": "Sacrament of Reconciliation",
+                    "source_file": source_file,
+                })
+
+    return events
+
+
+def extract_events_from_text(text, parish, source_file):
+    events = []
+
+    # ==========================================
+    # 1. MASS EVENTS (NEW — THIS FIXES YOUR ISSUE)
+    # ==========================================
+    mass_events = extract_mass_events(text, parish, source_file)
+    events.extend(mass_events)
+
+    # ==========================================
+    # 2. YOUR ORIGINAL EVENT EXTRACTION (UNCHANGED LOGIC)
+    # ==========================================
+    lines = [clean_text(line) for line in text.splitlines() if clean_text(line)]
 
     for i, line in enumerate(lines):
         if not looks_like_event_line(line):
@@ -457,18 +540,15 @@ def extract_events_from_text(text, parish, source_file):
 
         context = " ".join([previous_line, next_line, second_next_line])
 
-        title = line
-
-        if len(title) > 110:
-            title = title[:110] + "..."
+        title = line[:110]
 
         date_label = find_date_near_line(line, context)
         time_label = find_time_near_line(line, context)
 
-        description = clean_text(" ".join([line, next_line, second_next_line]))
+        description = clean_text(context)
         category = infer_category(title, description)
 
-        event = {
+        events.append({
             "id": make_event_id(parish, title, date_label, time_label),
             "title": title,
             "date_label": date_label if date_label else "See bulletin",
@@ -477,13 +557,10 @@ def extract_events_from_text(text, parish, source_file):
             "category": category,
             "description": description,
             "source_file": source_file,
-        }
+        })
 
-        events.append(event)
-
-    unique = {}
-    for event in events:
-        unique[event["id"]] = event
+    # REMOVE DUPLICATES
+    unique = {e["id"]: e for e in events}
 
     return list(unique.values())
 
