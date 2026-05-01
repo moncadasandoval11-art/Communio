@@ -751,10 +751,14 @@ else:
 
 
 # ============================================================
-# FIND AN EVENT GUI
+# FIND AN EVENT GUI (FIXED VISIBILITY + FILTER LOGIC)
 # ============================================================
 
-st.markdown("## Find an Event")
+st.markdown("""
+<h2 style="color:#073b4c; margin-top:30px;">
+Find an Event
+</h2>
+""", unsafe_allow_html=True)
 
 filter_col1, filter_col2, filter_col3 = st.columns([1, 1, 1.4])
 
@@ -774,37 +778,52 @@ with filter_col2:
 with filter_col3:
     search_query = st.text_input(
         "Search by keyword",
-        placeholder="Try: rosary, youth, Bible study, adoration..."
+        placeholder="Try: mass, confession, rosary..."
     )
 
 
+# ============================================================
+# 🔥 IMPROVED FILTERING (THIS FIXES YOUR ISSUE)
+# ============================================================
+
 filtered_df = events_df.copy()
 
+# CATEGORY FILTER (more flexible for Mass)
 if selected_category != "All":
-    filtered_df = filtered_df[filtered_df["category"] == selected_category]
+    filtered_df = filtered_df[
+        filtered_df["category"].str.contains(selected_category, case=False, na=False)
+    ]
 
+# PARISH FILTER (fixes mismatch issues)
 if selected_parish != "All":
-    filtered_df = filtered_df[filtered_df["parish"] == selected_parish]
+    filtered_df = filtered_df[
+        filtered_df["parish"].str.contains(selected_parish, case=False, na=False)
+    ]
 
+# SEARCH FILTER (THIS IS KEY FOR MASS/CONFESSION)
 if search_query.strip():
     q = search_query.lower().strip()
 
     filtered_df = filtered_df[
         filtered_df.apply(
-            lambda row: q in " ".join([
-                str(row.get("title", "")),
-                str(row.get("description", "")),
-                str(row.get("parish", "")),
-                str(row.get("category", "")),
-                str(row.get("date_label", "")),
-                str(row.get("time", "")),
-            ]).lower(),
+            lambda row: any(
+                q in str(row.get(col, "")).lower()
+                for col in ["title", "description", "parish", "category"]
+            ),
             axis=1
         )
     ]
 
 
-st.markdown(f"### {len(filtered_df)} event(s) found")
+# ============================================================
+# DISPLAY RESULTS
+# ============================================================
+
+st.markdown(f"""
+<h4 style="color:#075763;">
+{len(filtered_df)} event(s) found
+</h4>
+""", unsafe_allow_html=True)
 
 if filtered_df.empty:
     st.warning("No events matched your filters.")
