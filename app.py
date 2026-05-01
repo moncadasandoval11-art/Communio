@@ -1308,7 +1308,7 @@ with header_left:
 with header_right:
     st.markdown('<div class="main-title">COMMUNIO</div>', unsafe_allow_html=True)
     st.markdown(
-        '<div class="subtitle">A coastal Catholic guide to parish life across the Diocese of Palm Beach.</div>',
+        '<div class="subtitle">Connecting parish life across the Diocese of Palm Beach.</div>',
         unsafe_allow_html=True
     )
 
